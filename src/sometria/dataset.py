@@ -7,11 +7,14 @@ import glob
 
 from pathlib import Path
 
-from sometria.human import _load_sample
+from sometria.human import _load_sample, _resample_sample
 
 # NOTE: Hardcoded paths, no need for more complexity
 PATH_HUMAN_DEFINITION : Path = Path("config/human.yaml")
 PATH_OUTPUT_ROOT: Path = Path("data/processed")
+
+# Uniform rate for every sample. See _resample_sample for why 60 Hz.
+TARGET_HZ: float = 60.0
 
 def preprocess(
     *,
@@ -19,6 +22,7 @@ def preprocess(
     pattern: str,
     human: dict,
     save_path: str | Path,
+    target_hz: float = TARGET_HZ,
 ) -> pl.DataFrame:
 
     search_path = f"{str(input_root)}/{pattern}"
@@ -39,6 +43,7 @@ def preprocess(
     for i, path in enumerate(files, start=1):
 
         sample = _load_sample(path, human)
+        sample = _resample_sample(sample, target_hz)
 
         # Normalize path
         sample["path"] = str(Path(sample["path"]).relative_to(input_root))
@@ -55,7 +60,7 @@ def preprocess(
         # Store metadata of the sample
         sample_dict = { "sample": i, "sample_path": str(sample_motion_path.relative_to(save_path)) }
         sample_dict.update({
-            k: sample[k] for k in ("path", "metadata", "hz", "n_frames", "duration")
+            k: sample[k] for k in ("path", "metadata", "hz", "original_hz", "n_frames", "duration")
         })
         sample_rows.append(sample_dict)
 

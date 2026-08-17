@@ -67,8 +67,22 @@ root_position_dofs:
 # Dofs that are the rotational root of the kinematic chain
 root_rotational_dofs:
   - pelvis_rotation
-  - pelvis_tilt 
-  - pelvis_list 
+  - pelvis_tilt
+  - pelvis_list
+
+# The vertical axis among root_position_dofs.
+vertical_dof: pelvis_tz
+
+# What this buys: every dof is now one angle with identical semantics, so the tensor is a clean
+# per-joint token space, and the representation is invariant to world position and heading by
+# construction rather than by augmentation.
+excluded_dofs:
+  - pelvis_tilt
+  - pelvis_list
+  - pelvis_rotation
+  - pelvis_tx
+  - pelvis_ty
+  - pelvis_tz
 
 # Additional metadata about the subject
 metadata:
