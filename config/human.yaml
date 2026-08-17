@@ -1,0 +1,76 @@
+
+# All dof channels available in the human model
+channels:
+  - pos
+  - vel
+  - acc
+  - tau
+
+# All dofs available in the human model
+dofs:
+  - pelvis_tilt           #00 
+  - pelvis_list           #01 
+  - pelvis_rotation       #02
+  - pelvis_tx             #03 
+  - pelvis_ty             #04 
+  - pelvis_tz             #05
+  - hip_flexion_r         #06 
+  - hip_adduction_r       #07 
+  - hip_rotation_r        #08
+  - knee_angle_r          #09 
+  - ankle_angle_r         #10 
+  - subtalar_angle_r      #11 
+  - mtp_angle_r           #12
+  - hip_flexion_l         #13 
+  - hip_adduction_l       #14 
+  - hip_rotation_l        #15
+  - knee_angle_l          #16 
+  - ankle_angle_l         #17 
+  - subtalar_angle_l      #18 
+  - mtp_angle_l           #19
+  - lumbar_bending        #20 
+  - lumbar_extension      #21 
+  - lumbar_twist          #22
+  - thorax_bending        #23 
+  - thorax_extension      #24 
+  - thorax_twist          #25
+  - head_bending          #26 
+  - head_extension        #27 
+  - head_twist            #28
+  - scapula_abduction_r   #29 
+  - scapula_elevation_r   #30 
+  - scapula_upward_rot_r  #31
+  - scapula_abduction_l   #32 
+  - scapula_elevation_l   #33 
+  - scapula_upward_rot_l  #34
+  - shoulder_r_x          #35 
+  - shoulder_r_y          #36 
+  - shoulder_r_z          #37
+  - shoulder_l_x          #38 
+  - shoulder_l_y          #39 
+  - shoulder_l_z          #40
+  - elbow_flexion_r       #41 
+  - elbow_flexion_l       #42
+  - pro_sup_r             #43 
+  - pro_sup_l             #44
+  - wrist_flexion_r       #45 
+  - wrist_deviation_r     #46
+  - wrist_flexion_l       #47 
+  - wrist_deviation_l     #48
+
+# Dofs that are the positional root of the kinematic chain
+root_position_dofs:
+  - pelvis_tx
+  - pelvis_ty
+  - pelvis_tz
+
+# Dofs that are the rotational root of the kinematic chain
+root_rotational_dofs:
+  - pelvis_rotation
+  - pelvis_tilt 
+  - pelvis_list 
+
+# Additional metadata about the subject
+metadata:
+  - subject_height_m
+  - subject_mass_kg
