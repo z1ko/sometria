@@ -9,6 +9,48 @@ from pathlib import Path
 from sometria.catalog import MotionViewSpec, build_motion_view
 
 
+class RandomWindowCollate:
+    """Collate variable-length motions into fixed-size training windows."""
+
+    def __init__(self, window_frames: int) -> None:
+        if window_frames <= 0:
+            raise ValueError("window_frames must be positive.")
+        self.window_frames = window_frames
+
+    def __call__(self, batch: list[dict]) -> dict:
+        windows = []
+        valid = []
+        sample_ids = []
+        source_paths = []
+
+        for item in batch:
+            features = item["features"]
+            n_frames = features.shape[0]
+            sample_ids.append(item["sample_id"])
+            source_paths.append(item["source_path"])
+
+            if n_frames >= self.window_frames:
+                max_start = n_frames - self.window_frames
+                start = int(t.randint(max_start + 1, ()).item())
+                window = features[start:start + self.window_frames]
+                valid_window = t.ones(self.window_frames, dtype=t.bool)
+            else:
+                window = features.new_zeros((self.window_frames, *features.shape[1:]))
+                window[:n_frames] = features
+                valid_window = t.zeros(self.window_frames, dtype=t.bool)
+                valid_window[:n_frames] = True
+
+            windows.append(window)
+            valid.append(valid_window)
+
+        return {
+            "features": t.stack(windows),
+            "valid": t.stack(valid),
+            "sample_id": sample_ids,
+            "source_path": source_paths,
+        }
+
+
 class MotionDataset(t.utils.data.Dataset):
     def __init__(
         self,
@@ -89,6 +131,7 @@ class MotionDataModule(L.LightningDataModule):
         self.root_folder = Path(config.dataloader.root)
         self.batch_size = config.dataloader.batch_size
         self.num_workers = config.dataloader.get("num_workers", 4)
+        self.window_frames = config.dataloader.get("window_frames", 256)
 
         normalization = config.dataloader.get("normalization")
         if normalization is None:
@@ -133,6 +176,7 @@ class MotionDataModule(L.LightningDataModule):
             num_workers=self.num_workers,
             persistent_workers=self.num_workers > 0,
             prefetch_factor=2 if self.num_workers > 0 else None,
+            collate_fn=RandomWindowCollate(self.window_frames),
         )
 
     def train_dataloader(self):
