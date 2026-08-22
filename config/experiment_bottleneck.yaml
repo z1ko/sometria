@@ -1,7 +1,7 @@
 
 dataloader:
   root: data/processed
-  normalization: stats/opensim_sincos_vel_acc_tau_v1/pretrain_v1_train_clean.pt
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_train_clean.pt
   batch_size: 8
   num_workers: 4
   window_frames: 256
@@ -19,7 +19,8 @@ dataloader:
 model:
   num_dofs: 43
   num_features: 5
-  hidden_channels: 256
+  hidden_channels: 256   # working width of the conv stack
+  latent_channels: 64    # the actual bottleneck, 215 -> 64 is 3.4x
   depth: 3
   kernel_size: 5
   lr: 0.001
@@ -27,7 +28,7 @@ model:
 
 training:
   seed: 13
-  epochs: 20
+  epochs: 10
   limit_train_batches: 1.0
   limit_val_batches: 1.0
   overfit_batches: 0

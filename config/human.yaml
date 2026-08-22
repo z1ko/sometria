@@ -70,31 +70,15 @@ groups:
   left_shoulder_complex:  [32, 33, 34, 38, 39, 40]
   left_lower_arm:         [42, 44, 47, 48]
 
-# Dofs that are the positional root of the kinematic chain
-root_position_dofs:
-  - pelvis_tx
-  - pelvis_ty
-  - pelvis_tz
-
-# Dofs that are the rotational root of the kinematic chain
-root_rotational_dofs:
-  - pelvis_rotation
-  - pelvis_tilt
-  - pelvis_list
-
-# The vertical axis among root_position_dofs.
-vertical_dof: pelvis_tz
-
-# What this buys: every dof is now one angle with identical semantics, so the tensor is a clean
-# per-joint token space, and the representation is invariant to world position and heading by
-# construction rather than by augmentation.
+# Dofs ignored by the model representation, they encode the pose original global
+# position and orientation, they can be a shortcut.
 excluded_dofs:
-  - pelvis_tilt
-  - pelvis_list
-  - pelvis_rotation
-  - pelvis_tx
-  - pelvis_ty
-  - pelvis_tz
+  - pelvis_tilt     #00
+  - pelvis_list     #01
+  - pelvis_rotation #02
+  - pelvis_tx       #03
+  - pelvis_ty       #04
+  - pelvis_tz       #05
 
 # Additional metadata about the subject
 metadata:

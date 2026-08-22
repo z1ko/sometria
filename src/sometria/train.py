@@ -16,24 +16,6 @@ from sometria.model import MotionConvAutoencoder
 EPOCHS = 200
 
 
-def lr_scheduler(optimizer, warmup_steps: int, total_steps: int):
-    return t.optim.lr_scheduler.SequentialLR(
-        optimizer,
-        milestones=[warmup_steps],
-        schedulers=[
-            t.optim.lr_scheduler.LinearLR(
-                optimizer, 
-                start_factor=0.01, 
-                total_iters=warmup_steps
-            ),
-            t.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, 
-                T_max=total_steps - warmup_steps, 
-                eta_min=1e-3
-            )
-        ]
-    )
-
 def train(config: DictConfig, output: Path):
     output = Path(output)
 

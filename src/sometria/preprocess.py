@@ -92,6 +92,33 @@ def _estimate_hz(time: np.ndarray) -> float:
     return float(1.0 / np.median(dt))
 
 
+# Raw velocity, acceleration and torque are heavy-tailed: knee torque runs three orders of
+# magnitude above wrist torque, and rare impact frames reach tens of sigma after normalization,
+# where they dominate any mean-squared loss. signed_log compresses that range while staying
+# smooth, sign-preserving, and near-identity for small values (d/dx = 1 at 0).
+def signed_log(x: np.ndarray) -> np.ndarray:
+    """Compress magnitude while preserving sign: ``sign(x) * log1p(|x|)``."""
+
+    return np.sign(x) * np.log1p(np.abs(x))
+
+
+def signed_exp(x: np.ndarray) -> np.ndarray:
+    """Invert :func:`signed_log`."""
+
+    return np.sign(x) * np.expm1(np.abs(x))
+
+
+# Which feature slots get the signed log. The position slots are sin/cos, already bounded in
+# [-1, 1], so only the derivative channels need compressing.
+def feature_log_mask(human: dict) -> np.ndarray:
+    """Return a mask for channels that may benefit from signed-log scaling."""
+
+    mask = np.ones((len(feature_dofs(human)), 5), dtype=bool)
+    mask[:, :2] = False
+    return mask
+
+
+
 # Build human model features: (T, dofs, 4) -> (T, kept dofs, 5)
 # Every kept dof is an angle, so all of them get the same [sin, cos, vel, acc, tau] slots and the
 # dof axis stays a clean per-joint token space. The root translations are excluded.
@@ -100,9 +127,10 @@ def build_features(motion: np.ndarray, human: dict) -> np.ndarray:
 
     Input shape is ``(time, dofs, 4)`` with channels ``position, velocity,
     acceleration, torque``. The output shape is ``(time, kept_dofs, 5)`` with
-    channels ``sin(position), cos(position), velocity, acceleration, torque``.
-    Root translations are expected to be listed in ``excluded_dofs`` because
-    they are distances, not angles.
+    channels ``sin(position), cos(position), velocity, acceleration, torque``,
+    with the three derivative channels passed through ``signed_log`` (see
+    ``feature_log_mask``). Root translations are expected to be listed in
+    ``excluded_dofs`` because they are distances, not angles.
     """
 
     kept = np.delete(motion, _dof_indices(human, "excluded_dofs"), axis=1)
@@ -111,7 +139,7 @@ def build_features(motion: np.ndarray, human: dict) -> np.ndarray:
     out[:, :, 0] = np.sin(kept[:, :, 0])
     out[:, :, 1] = np.cos(kept[:, :, 0])
     out[:, :, 2:] = kept[:, :, 1:]
-    return out
+    return np.where(feature_log_mask(human), signed_log(out), out)
 
 
 # Names of the dofs that survive `build_features`, in output order
@@ -130,16 +158,6 @@ def feature_dofs(human: dict) -> list[str]:
             f"branch in build_features."
         )
     return [dof for _, dof in kept]
-
-
-# Which feature slots get the signed log. The position slots are sin/cos, already bounded in
-# [-1, 1], so only the derivative channels need compressing.
-def feature_log_mask(human: dict) -> np.ndarray:
-    """Return a mask for channels that may benefit from signed-log scaling."""
-
-    mask = np.ones((len(feature_dofs(human)), 5), dtype=bool)
-    mask[:, :2] = False
-    return mask
 
 
 def feature_normalization_mask(human: dict) -> np.ndarray:
