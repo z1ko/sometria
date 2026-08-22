@@ -5,11 +5,15 @@ description = "Biomechanical foundation model"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "lightning>=2.6.5",
     "matplotlib>=3.11.1",
+    "omegaconf>=2.3.1",
     "polars>=1.43.2",
     "pyyaml>=6.0.3",
     "scipy>=1.18.0",
     "torch>=2.13.0",
+    "tqdm>=4.70.0",
+    "wandb>=0.28.2",
 ]
 
 [build-system]

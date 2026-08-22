@@ -1,102 +1,41 @@
 
-from typing import Any
-
+import lightning as L
+from omegaconf import DictConfig
 import torch as t
 import polars as pl
-import glob
 
 from pathlib import Path
 
-from sometria.human import _load_sample, _resample_sample
-
-# NOTE: Hardcoded paths, no need for more complexity
-PATH_HUMAN_DEFINITION : Path = Path("config/human.yaml")
-PATH_OUTPUT_ROOT: Path = Path("data/processed")
-
-# Uniform rate for every sample. See _resample_sample for why 60 Hz.
-TARGET_HZ: float = 60.0
-
-def preprocess(
-    *,
-    input_root: str | Path,
-    pattern: str,
-    human: dict,
-    save_path: str | Path,
-    target_hz: float = TARGET_HZ,
-) -> pl.DataFrame:
-
-    search_path = f"{str(input_root)}/{pattern}"
-    save_path = Path(save_path)
-
-    files = sorted(Path(p) for p in glob.glob(search_path, recursive=True))
-    if not files:
-        raise FileNotFoundError(f"No CSV files found for pattern: {pattern}")
-
-    # Create samples directory
-    samples_dir = save_path / "samples"
-    samples_dir.mkdir(parents=True, exist_ok=True)
-
-    # How many files to store
-    written = 0
-
-    sample_rows: list[dict] = []
-    for i, path in enumerate(files, start=1):
-
-        sample = _load_sample(path, human)
-        sample = _resample_sample(sample, target_hz)
-
-        # Normalize path
-        sample["path"] = str(Path(sample["path"]).relative_to(input_root))
-
-        sample_motion_path = samples_dir / f"sample_{i:04}.pt"
-        t.save(
-            {
-                "motion": t.tensor(sample["motion"]),
-                "time":   t.tensor(sample["time"])
-            }, 
-            sample_motion_path
-        )
-
-        # Store metadata of the sample
-        sample_dict = { "sample": i, "sample_path": str(sample_motion_path.relative_to(save_path)) }
-        sample_dict.update({
-            k: sample[k] for k in ("path", "metadata", "hz", "original_hz", "n_frames", "duration")
-        })
-        sample_rows.append(sample_dict)
-
-        written += 1
-        if i % 100 == 0:
-            print(f"Processed {i}/{len(files)} samples")
-
-    samples_df = pl.DataFrame(sample_rows)
-    samples_df.write_parquet(save_path / "samples.parquet")
-    return samples_df
+from sometria.catalog import MotionViewSpec, build_motion_view
 
 
 class MotionDataset(t.utils.data.Dataset):
     def __init__(
         self,
         root_folder: str | Path,
-        split: str | None = None,
-        samples_df: pl.DataFrame | None = None,
+        samples: pl.DataFrame,
+        normalization_path: str | Path,
     ) -> None:
-        """`split` is one of BABEL's train/val/test, or "pretrain" for everything BABEL
-        does not annotate plus its train split. Requires splits.enrich_samples() to have run."""
         super().__init__()
-
         self.root_folder = Path(root_folder)
+        self.samples = samples
+        self.normalization_path = self._resolve_normalization_path(normalization_path)
 
-        if samples_df is None:
-            self.samples = pl.read_parquet(self.root_folder / "samples.parquet")
-        else:
-            self.samples = samples_df
-
-        if split == "pretrain":
-            self.samples = self.samples.filter(
-                pl.col("split").is_null() | (pl.col("split") == "train")
+        if not self.normalization_path.exists():
+            raise FileNotFoundError(
+                f"Normalization stats not found: {self.normalization_path}. "
+                "Create them during preprocessing and pass the path here."
             )
-        elif split is not None:
-            self.samples = self.samples.filter(pl.col("split") == split)
+
+        stats = t.load(self.normalization_path, weights_only=True)
+        self.mean = stats["mean"].float()
+        self.std = stats["std"].float()
+
+    def _resolve_normalization_path(self, normalization_path: str | Path) -> Path:
+        path = Path(normalization_path)
+        if path.is_absolute():
+            return path
+        return self.root_folder / path
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -104,15 +43,85 @@ class MotionDataset(t.utils.data.Dataset):
     def __getitem__(self, index):
         row = self.samples.row(index, named=True)
         sample = t.load(
-            self.root_folder / row["sample_path"],
+            self.root_folder / row["motion_path"],
             weights_only=True
         )
 
+        features = sample["features"].float()
+        if features.shape[1:] != self.mean.shape[1:]:
+            raise ValueError(
+                f"{row['motion_path']} has feature shape {tuple(features.shape[1:])}, "
+                f"but normalization stats expect {tuple(self.mean.shape[1:])}."
+            )
+
         return {
-            "motion": sample["motion"],
+            "features": (features - self.mean) / self.std,
             "time": sample["time"],
-            "sample": row["sample"],
-            "path": row["path"],
+            "sample_id": row["sample_id"],
+            "source_dataset": row["source_dataset"],
+            "source_subset": row["source_subset"],
+            "source_path": row["source_path"],
+            "representation": row["representation"],
             "metadata": row["metadata"],
             "hz": row["hz"],
+            "duration": row["duration"],
         }
+
+class MotionDataModule(L.LightningDataModule):
+    def __init__(self, config: DictConfig) -> None:
+        super().__init__()
+
+        self.root_folder = Path(config.dataloader.root)
+        self.batch_size = config.dataloader.batch_size
+        self.num_workers = config.dataloader.get("num_workers", 4)
+
+        normalization = config.dataloader.get("normalization")
+        if normalization is None:
+            raise ValueError("config.dataloader.normalization is required.")
+        self.normalization_path = Path(normalization)
+
+        self.train_spec = MotionViewSpec(
+            split_set=config.dataloader.train.split_set,
+            split=config.dataloader.train.split,
+            source_datasets=tuple(config.dataloader.train.get("source_datasets", [])),
+        )
+
+        self.val_spec = MotionViewSpec(
+            split_set=config.dataloader.val.split_set,
+            split=config.dataloader.val.split,
+            source_datasets=tuple(config.dataloader.val.get("source_datasets", [])),
+        )
+
+    def setup(self, stage: str | None = None) -> None:
+        if stage in (None, "fit"):
+            train_samples = build_motion_view(self.root_folder, self.train_spec)
+            val_samples   = build_motion_view(self.root_folder, self.val_spec)
+
+            self.train_dataset = MotionDataset(
+                self.root_folder,
+                train_samples,
+                normalization_path=self.normalization_path,
+            )
+            self.val_dataset = MotionDataset(
+                self.root_folder,
+                val_samples,
+                normalization_path=self.normalization_path,
+            )
+        
+
+    def _loader(self, dataset: MotionDataset, shuffle: bool, drop_last: bool):
+        return t.utils.data.DataLoader(
+            dataset=dataset,
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            num_workers=self.num_workers,
+            persistent_workers=self.num_workers > 0,
+            prefetch_factor=2 if self.num_workers > 0 else None,
+        )
+
+    def train_dataloader(self):
+        return self._loader(self.train_dataset, drop_last=True, shuffle=True)
+
+    def val_dataloader(self):
+        return self._loader(self.val_dataset, drop_last=False, shuffle=False)
