@@ -141,6 +141,19 @@ def feature_log_mask(human: dict) -> np.ndarray:
     mask[:, :2] = False
     return mask
 
+
+def feature_normalization_mask(human: dict) -> np.ndarray:
+    """Return the feature slots that should receive mean/std normalization.
+
+    The first two feature channels are ``sin(angle)`` and ``cos(angle)``. They
+    are already bounded and encode circular geometry, so they are passed through
+    unchanged. Velocity, acceleration, and torque channels are normalized.
+    """
+
+    mask = np.ones((len(feature_dofs(human)), 5), dtype=bool)
+    mask[:, :2] = False
+    return mask
+
 # Bring a sample onto a uniform rate. 60 Hz leaves 2x headroom over the ~15 Hz the data actually
 # carries: the marker trajectories were low-pass filtered upstream before being differentiated, so
 # above 30 Hz there is only fitting noise (pos and vel measure exactly 0.000% there, acc and tau
@@ -446,14 +459,17 @@ def compute_feature_normalization(
     *,
     output_root: str | Path,
     samples: pl.DataFrame,
+    normalization_mask: np.ndarray | t.Tensor | None = None,
     eps: float = 1e-6,
 ) -> dict:
     """Compute per-DOF, per-channel feature normalization statistics.
 
     Statistics are accumulated over all frames from the provided sample table and
     returned with shapes broadcastable over sample tensors: ``mean`` and ``std``
-    are ``(1, dofs, features)``. Use a train-only view here to avoid leaking
-    validation or test distributions into training.
+    are ``(1, dofs, features)``. ``normalization_mask`` marks which slots should
+    actually be normalized at runtime; unmasked slots pass through unchanged.
+    Use a train-only view here to avoid leaking validation or test distributions
+    into training.
     """
 
     output_root = Path(output_root)
@@ -502,6 +518,16 @@ def compute_feature_normalization(
     assert total_sq is not None
     assert feature_shape is not None
 
+    if normalization_mask is None:
+        normalization_mask = t.ones(feature_shape, dtype=t.bool)
+    else:
+        normalization_mask = t.as_tensor(normalization_mask, dtype=t.bool)
+        if tuple(normalization_mask.shape) != feature_shape:
+            raise ValueError(
+                f"normalization_mask has shape {tuple(normalization_mask.shape)}, "
+                f"but features have shape {feature_shape}."
+            )
+
     mean = total / n_frames
     variance = (total_sq / n_frames) - mean.square()
     std = variance.clamp_min(0.0).sqrt().clamp_min(eps)
@@ -509,6 +535,7 @@ def compute_feature_normalization(
     return {
         "mean": mean.unsqueeze(0).to(dtype=t.float32),
         "std": std.unsqueeze(0).to(dtype=t.float32),
+        "normalization_mask": normalization_mask.unsqueeze(0),
         "n_frames": n_frames,
         "n_samples": n_samples,
         "feature_shape": feature_shape,
@@ -524,6 +551,7 @@ def save_feature_normalization(
     representation: str,
     split_set: str | None = None,
     split: str | None = None,
+    normalization_mask: np.ndarray | t.Tensor | None = None,
     eps: float = 1e-6,
 ) -> Path:
     """Compute and save normalization stats for a named representation/view."""
@@ -532,6 +560,7 @@ def save_feature_normalization(
     stats = compute_feature_normalization(
         output_root=output_root,
         samples=samples,
+        normalization_mask=normalization_mask,
         eps=eps,
     )
     stats |= {

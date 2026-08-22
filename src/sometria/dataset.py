@@ -30,6 +30,15 @@ class MotionDataset(t.utils.data.Dataset):
         stats = t.load(self.normalization_path, weights_only=True)
         self.mean = stats["mean"].float()
         self.std = stats["std"].float()
+        self.normalization_mask = stats.get(
+            "normalization_mask",
+            t.ones_like(self.mean, dtype=t.bool),
+        ).bool()
+        if self.normalization_mask.shape != self.mean.shape:
+            raise ValueError(
+                f"normalization_mask has shape {tuple(self.normalization_mask.shape)}, "
+                f"but mean has shape {tuple(self.mean.shape)}."
+            )
 
     def _resolve_normalization_path(self, normalization_path: str | Path) -> Path:
         path = Path(normalization_path)
@@ -54,8 +63,14 @@ class MotionDataset(t.utils.data.Dataset):
                 f"but normalization stats expect {tuple(self.mean.shape[1:])}."
             )
 
+        normalized_features = t.where(
+            self.normalization_mask,
+            (features - self.mean) / self.std,
+            features,
+        )
+
         return {
-            "features": (features - self.mean) / self.std,
+            "features": normalized_features,
             "time": sample["time"],
             "sample_id": row["sample_id"],
             "source_dataset": row["source_dataset"],
