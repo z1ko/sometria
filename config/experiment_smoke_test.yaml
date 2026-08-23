@@ -18,6 +18,7 @@ dataloader:
     source_datasets: ["AMASS"]
 
 model:
+  name: conv_autoencoder
   num_dofs: 43
   num_features: 5
   hidden_channels: 256

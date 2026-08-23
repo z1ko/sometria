@@ -53,7 +53,7 @@ def patchify(features: t.Tensor, patch_size: int) -> t.Tensor:
         raise ValueError(f"window of {T} frames is not divisible by patch_size {patch_size}")
 
     patches = features.reshape(B, T // patch_size, patch_size, D, C)
-    patches = patches.permute(0, 1, 3, 2, 4)                  # (B, TP, D, patch_size, C)
+    patches = patches.permute(0, 1, 3, 2, 4) # (B, TP, D, patch_size, C)
     return patches.reshape(B, -1, patch_size, C)
 
 

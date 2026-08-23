@@ -1,5 +1,3 @@
-"""Compatibility exports for older notebooks and checkpoints."""
-
 from sometria.models.autoencoder import MotionConvAutoencoder, MotionMaskedAutoencoder
 
 __all__ = ["MotionConvAutoencoder", "MotionMaskedAutoencoder"]

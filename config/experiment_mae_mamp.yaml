@@ -3,7 +3,7 @@ dataloader:
   root: data/processed
   human: config/human.yaml
   normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_train_clean.pt
-  batch_size: 8
+  batch_size: 4
   num_workers: 4
   window_frames: 240
 
@@ -11,22 +11,30 @@ dataloader:
     split_set: pretrain_v1
     split: train
     source_datasets: ["AMASS"]
-  
+
   val:
     split_set: babel_official
     split: val
     source_datasets: ["AMASS"]
 
 model:
-  name: conv_autoencoder
+  name: masked_autoencoder
   num_dofs: 43
   num_features: 5
-  hidden_channels: 256   # working width of the conv stack
-  latent_channels: 64    # the actual bottleneck, 215 -> 64 is 3.4x
-  depth: 3
-  kernel_size: 5
-  lr: 0.001
+  patch_size: 8
+  max_time_patches: 64
+  d_model: 256
+  encoder_layers: 4
+  decoder_layers: 2
+  num_heads: 4
+  mlp_ratio: 4.0
+  dropout: 0.0
+  mask_ratio: 0.80
+  mask_strategy: mamp
+  tau: 0.25
+  score_channels: [2]
   loss_channels: [2, 3, 4]
+  lr: 0.001
 
 training:
   seed: 13

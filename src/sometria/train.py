@@ -11,9 +11,21 @@ from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
 from sometria.dataset import MotionDataModule
-from sometria.model import MotionConvAutoencoder
+from sometria.models import MotionConvAutoencoder, MotionMaskedAutoencoder
 
 EPOCHS = 200
+
+
+def build_model(config: DictConfig) -> L.LightningModule:
+    model_config = OmegaConf.to_container(config.model, resolve=True)
+    name = model_config.pop("name", "conv_autoencoder")
+
+    if name == "conv_autoencoder":
+        return MotionConvAutoencoder(**model_config)
+    if name == "masked_autoencoder":
+        return MotionMaskedAutoencoder(**model_config)
+
+    raise ValueError(f"Unknown model: {name}")
 
 
 def train(config: DictConfig, output: Path):
@@ -21,8 +33,7 @@ def train(config: DictConfig, output: Path):
 
     L.seed_everything(config.training.seed, workers=True)
     datamodule = MotionDataModule(config)
-    model_config = OmegaConf.to_container(config.model, resolve=True)
-    model = MotionConvAutoencoder(**model_config)
+    model = build_model(config)
 
     trainer = L.Trainer(
         accelerator="auto",
