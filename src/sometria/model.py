@@ -1,5 +1,7 @@
 """Small baseline models for validating the motion training pipeline."""
 
+from typing import Any
+
 import lightning as L
 import torch as t
 import torch.nn as nn
@@ -143,3 +145,24 @@ class MotionConvAutoencoder(L.LightningModule):
                 "interval": "step",
             },
         }
+
+
+def mhsa_encoder(
+    d_model: int, 
+    num_layers: int, 
+    num_heads: int, 
+    mlp_ratio: float, 
+    dropout: float
+) -> nn.Module:
+    return nn.TransformerEncoder(
+        nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=int(d_model * mlp_ratio),
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True
+        ),
+        num_layers=num_layers
+    )

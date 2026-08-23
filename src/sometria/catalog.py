@@ -52,6 +52,7 @@ class MotionViewSpec:
     label_sources: tuple[str, ...] = ()     # ("BABEL",)
     require_labels: bool = False
     exclude_broken: bool = True
+    min_frames: int | None = None           # drop samples too short to fill a window
 
 
 def stable_sample_id(source_dataset: str, source_path: str) -> str:
@@ -215,6 +216,12 @@ def build_motion_view(root: str | Path, spec: MotionViewSpec) -> pl.DataFrame:
     # Remove "broken" samples
     if spec.exclude_broken and "broken" in df.columns:
         df = df.filter(~pl.col("broken"))
+
+    # Samples shorter than a training window would otherwise be zero-padded by the
+    # collate, and padding scores as motionless -- so motion-aware masking keeps it,
+    # spending the context budget on frames that are not there.
+    if spec.min_frames is not None:
+        df = df.filter(pl.col("n_frames") >= spec.min_frames)
 
     if spec.source_datasets:
         df = df.filter(pl.col("source_dataset").is_in(spec.source_datasets))

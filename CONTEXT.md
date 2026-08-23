@@ -94,3 +94,38 @@ question asked in two directions. Deliberately not in `babel.py` — the policy 
 out whatever an evaluation benchmark reserved", which stops being BABEL-shaped as soon
 as a second label source exists.
 _Avoid_: split strategy, sampling policy
+
+**Window**:
+The fixed-length crop one batch item carries: `window_frames` frames taken at a random
+offset from one sample by `RandomWindowCollate`. A window is what the model sees; a
+patch is how that window is tokenized. Samples shorter than a window are excluded by
+`MotionViewSpec.min_frames`, not padded — 22.8% of `pretrain_v1/train` samples but only
+8.0% of its frames, and a zero-padded window would otherwise fill the context set with
+tokens that score as motionless.
+_Avoid_: clip, crop, patch
+
+**Patch**:
+One token: a single DOF over `patch_size` consecutive frames, so `patch_size * 5` values.
+The grid is `TP x 43`, flattened as `t * 43 + d` — the ordering `PositionalEncoding.get_flat()`
+already produces. One DOF wide on purpose: 43 is prime, so no uniform spatial grouping
+exists, and the DOF axis is already a per-joint token space. `patch_size = 8` at 60 Hz is
+133 ms, the same physical duration as MAMP's 4 frames at 30 Hz.
+_Avoid_: window, chunk, segment, token grid cell
+
+**Context** and **Target**:
+The two halves of a masked window, held as index sets into the flattened token grid:
+context is what the encoder sees, target is what the decoder must predict. Disjoint,
+exhaustive, and fixed-size once a mask ratio is chosen. Indices rather than a binary
+mask, so the loss gathers its targets instead of multiplying across every token, and so
+a mask can be plotted without instantiating a model.
+_Avoid_: visible/masked, keep/remove, unmasked
+
+**Motion-aware masking**:
+Choosing targets in proportion to how much a patch moves, so the informative parts of a
+window are the ones held out. The score is `|vel|` meaned over the patch's frames — read
+through the channel `Representation` names, never a literal index — turned into a
+distribution by `softmax(score / (max * tau))` and drawn without replacement by Gumbel
+top-k. `tau` interpolates: small sharpens toward deterministic top-k, large flattens
+toward uniform, and `<= 0` is plain random masking, which makes the ablation baseline
+the same function rather than a second code path.
+_Avoid_: importance sampling, saliency masking, hard mining
