@@ -155,11 +155,11 @@ class Representation:
     def to_model(self, features: t.Tensor, stats: dict) -> t.Tensor:
         """Features -> model input: mean/std normalization on the compressed channels."""
 
-        mask = t.from_numpy(self._mask)
+        mask = t.as_tensor(self._mask, device=features.device)
         return t.where(mask, (features - stats["mean"]) / stats["std"], features)
 
     def to_physical(self, x: t.Tensor, stats: dict) -> t.Tensor:
         """Model input (or output) -> features. The inverse of :meth:`to_model`."""
 
-        mask = t.from_numpy(self._mask)
+        mask = t.as_tensor(self._mask, device=x.device)
         return t.where(mask, x * stats["std"] + stats["mean"], x)
