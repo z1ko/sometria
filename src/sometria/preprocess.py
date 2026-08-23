@@ -6,13 +6,14 @@ This module owns the work that happens before training:
 - load raw OpenSim CSV files using the human model definition;
 - resample motion to the project-wide target rate;
 - measure sample quality on the raw kinematic/dynamic channels;
-- convert raw channels into model-ready features;
 - write processed tensors under ``motions/``;
 - update catalog/split tables under ``tables/``;
 - compute and save normalization statistics under ``stats/``.
 
 Dataset-specific importers belong here when they translate an external dataset
-format into the shared processed layout. Generic table filtering belongs in
+format into the shared processed layout. What the feature channels *mean* --
+encoding raw channels, decoding them back, normalizing -- belongs to
+``sometria.representation``. Generic table filtering belongs in
 ``sometria.catalog`` and runtime normalization application belongs in
 ``sometria.dataset``.
 """
@@ -29,9 +30,9 @@ import numpy as np
 import polars as pl
 import glob
 import tqdm
-import yaml
 
 from sometria.catalog import ANNOTATIONS, CATALOG, SPLITS, VOCABULARY
+from sometria.representation import Representation
 from sometria.splits import babel_key, sample_key
 
 # NOTE: Hardcoded paths, no need for more complexity
@@ -40,15 +41,6 @@ PATH_OUTPUT_ROOT: Path = Path("data/processed")
 
 # Uniform rate for every sample. See _resample_sample for why 60 Hz.
 TARGET_HZ: float = 60.0
-
-# Load the definition of the human model
-def _load_human_definition(path: str | Path) -> dict:
-    """Load the YAML description of the OpenSim human model columns."""
-
-    path = Path(path)
-    with path.open() as f:
-        return yaml.safe_load(f) or {}
-
 
 # All columns relative to the motion
 def _columns_kinematics(human: dict) -> list:
@@ -66,20 +58,6 @@ def _columns_metadata(human: dict) -> list:
     return human["metadata"]
 
 
-# Resolve a dof name (or list of names) from the config into indices along the dof axis
-def _dof_indices(human: dict, key: str) -> list[int]:
-    """Resolve DOF names from the human config into integer axis indices."""
-
-    index = {dof: i for i, dof in enumerate(human["dofs"])}
-    names = human.get(key) or []
-    if isinstance(names, str):
-        names = [names]
-    unknown = [n for n in names if n not in index]
-    if unknown:
-        raise KeyError(f"{key}: not in dofs: {unknown}")
-    return [index[n] for n in names]
-
-
 # Estimate the capture hz from the time column
 def _estimate_hz(time: np.ndarray) -> float:
     """Estimate the sample rate from a monotonically increasing time column."""
@@ -91,86 +69,6 @@ def _estimate_hz(time: np.ndarray) -> float:
         raise ValueError("Could not estimate Hz: no positive time deltas.")
     return float(1.0 / np.median(dt))
 
-
-# Raw velocity, acceleration and torque are heavy-tailed: knee torque runs three orders of
-# magnitude above wrist torque, and rare impact frames reach tens of sigma after normalization,
-# where they dominate any mean-squared loss. signed_log compresses that range while staying
-# smooth, sign-preserving, and near-identity for small values (d/dx = 1 at 0).
-def signed_log(x: np.ndarray) -> np.ndarray:
-    """Compress magnitude while preserving sign: ``sign(x) * log1p(|x|)``."""
-
-    return np.sign(x) * np.log1p(np.abs(x))
-
-
-def signed_exp(x: np.ndarray) -> np.ndarray:
-    """Invert :func:`signed_log`."""
-
-    return np.sign(x) * np.expm1(np.abs(x))
-
-
-# Which feature slots get the signed log. The position slots are sin/cos, already bounded in
-# [-1, 1], so only the derivative channels need compressing.
-def feature_log_mask(human: dict) -> np.ndarray:
-    """Return a mask for channels that may benefit from signed-log scaling."""
-
-    mask = np.ones((len(feature_dofs(human)), 5), dtype=bool)
-    mask[:, :2] = False
-    return mask
-
-
-
-# Build human model features: (T, dofs, 4) -> (T, kept dofs, 5)
-# Every kept dof is an angle, so all of them get the same [sin, cos, vel, acc, tau] slots and the
-# dof axis stays a clean per-joint token space. The root translations are excluded.
-def build_features(motion: np.ndarray, human: dict) -> np.ndarray:
-    """Convert raw OpenSim channels into the current model representation.
-
-    Input shape is ``(time, dofs, 4)`` with channels ``position, velocity,
-    acceleration, torque``. The output shape is ``(time, kept_dofs, 5)`` with
-    channels ``sin(position), cos(position), velocity, acceleration, torque``,
-    with the three derivative channels passed through ``signed_log`` (see
-    ``feature_log_mask``). Root translations are expected to be listed in
-    ``excluded_dofs`` because they are distances, not angles.
-    """
-
-    kept = np.delete(motion, _dof_indices(human, "excluded_dofs"), axis=1)
-
-    out = np.zeros(kept.shape[:2] + (5,), dtype=kept.dtype)
-    out[:, :, 0] = np.sin(kept[:, :, 0])
-    out[:, :, 1] = np.cos(kept[:, :, 0])
-    out[:, :, 2:] = kept[:, :, 1:]
-    return np.where(feature_log_mask(human), signed_log(out), out)
-
-
-# Names of the dofs that survive `build_features`, in output order
-def feature_dofs(human: dict) -> list[str]:
-    """Return DOF names in the same order as the feature tensor's DOF axis."""
-
-    excluded = set(_dof_indices(human, "excluded_dofs"))
-    translations = set(_dof_indices(human, "root_position_dofs"))
-    kept = [(i, dof) for i, dof in enumerate(human["dofs"]) if i not in excluded]
-
-    still_there = [dof for i, dof in kept if i in translations]
-    if still_there:
-        raise ValueError(
-            f"root_position_dofs are distances, not angles, so build_features cannot encode them "
-            f"as sin/cos: {still_there}. Either add them to excluded_dofs, or give them their own "
-            f"branch in build_features."
-        )
-    return [dof for _, dof in kept]
-
-
-def feature_normalization_mask(human: dict) -> np.ndarray:
-    """Return the feature slots that should receive mean/std normalization.
-
-    The first two feature channels are ``sin(angle)`` and ``cos(angle)``. They
-    are already bounded and encode circular geometry, so they are passed through
-    unchanged. Velocity, acceleration, and torque channels are normalized.
-    """
-
-    mask = np.ones((len(feature_dofs(human)), 5), dtype=bool)
-    mask[:, :2] = False
-    return mask
 
 # Bring a sample onto a uniform rate. 60 Hz leaves 2x headroom over the ~15 Hz the data actually
 # carries: the marker trajectories were low-pass filtered upstream before being differentiated, so
@@ -266,7 +164,6 @@ class ImportConfig:
     """Configuration for importing one raw dataset into the processed layout."""
 
     source_dataset: str     # "AMASS", "MotionX", ...
-    representation: str     # "opensim_49dof_tau", "smplx", ...
     input_root: Path
     output_root: Path
     pattern: str
@@ -307,12 +204,15 @@ def _upsert_table(path: Path, df: pl.DataFrame, keys: list[str]) -> pl.DataFrame
     df.write_parquet(path)
     return df
 
-def import_opensim_csv_dataset(*, config: ImportConfig, human: dict) -> pl.DataFrame:
+def import_opensim_csv_dataset(
+    *, config: ImportConfig, human: dict, representation: Representation
+) -> pl.DataFrame:
     """Import OpenSim-style CSV files into processed feature tensors and catalog rows.
 
     Each matched CSV becomes one ``.pt`` file under ``motions/<source_dataset>/``.
     The tensor payload stores model-ready ``features`` and ``time``. The catalog
-    stores provenance, shape information, timing, metadata, and quality metrics.
+    stores provenance, shape information, timing, metadata, and quality metrics,
+    with ``representation`` recording which encoding produced the tensors.
     Existing catalog rows with the same ``sample_id`` are replaced.
     """
 
@@ -334,7 +234,7 @@ def import_opensim_csv_dataset(*, config: ImportConfig, human: dict) -> pl.DataF
         sample_id = stable_sample_id(config.source_dataset, source_path)
 
         quality = measure_quality(sample["motion"], sample["hz"])
-        features = build_features(sample["motion"], human)
+        features = representation.encode(sample["motion"])
 
         # Save model-ready feature tensor. Quality is still measured on raw motion above.
         motion_path = motion_dir / f"{_safe_name(sample_id)}.pt"
@@ -353,7 +253,7 @@ def import_opensim_csv_dataset(*, config: ImportConfig, human: dict) -> pl.DataF
                 "source_subset": source_path.split("/")[0],
                 "source_path": source_path,
                 "motion_path": str(motion_path.relative_to(config.output_root)),
-                "representation": config.representation,
+                "representation": representation.name,
                 "n_dofs": features.shape[1],
                 "n_features": features.shape[2],
                 "metadata": sample["metadata"],
@@ -617,15 +517,16 @@ def compute_feature_normalization(
     *,
     output_root: str | Path,
     samples: pl.DataFrame,
-    normalization_mask: np.ndarray | t.Tensor | None = None,
+    representation: Representation,
     eps: float = 1e-6,
 ) -> dict:
     """Compute per-DOF, per-channel feature normalization statistics.
 
     Statistics are accumulated over all frames from the provided sample table and
     returned with shapes broadcastable over sample tensors: ``mean`` and ``std``
-    are ``(1, dofs, features)``. ``normalization_mask`` marks which slots should
-    actually be normalized at runtime; unmasked slots pass through unchanged.
+    are ``(1, dofs, features)``. Which slots actually get normalized at runtime is
+    the representation's business; the mask is copied into the payload only so
+    stats files written before ``sometria.representation`` existed stay readable.
     Use a train-only view here to avoid leaking validation or test distributions
     into training.
     """
@@ -676,15 +577,12 @@ def compute_feature_normalization(
     assert total_sq is not None
     assert feature_shape is not None
 
-    if normalization_mask is None:
-        normalization_mask = t.ones(feature_shape, dtype=t.bool)
-    else:
-        normalization_mask = t.as_tensor(normalization_mask, dtype=t.bool)
-        if tuple(normalization_mask.shape) != feature_shape:
-            raise ValueError(
-                f"normalization_mask has shape {tuple(normalization_mask.shape)}, "
-                f"but features have shape {feature_shape}."
-            )
+    mask = t.as_tensor(representation._mask, dtype=t.bool)
+    if tuple(mask.shape) != feature_shape:
+        raise ValueError(
+            f"{representation.name} expects feature shape {tuple(mask.shape)}, "
+            f"but the stored tensors have shape {feature_shape}."
+        )
 
     mean = total / n_frames
     variance = (total_sq / n_frames) - mean.square()
@@ -693,7 +591,7 @@ def compute_feature_normalization(
     return {
         "mean": mean.unsqueeze(0).to(dtype=t.float32),
         "std": std.unsqueeze(0).to(dtype=t.float32),
-        "normalization_mask": normalization_mask.unsqueeze(0),
+        "normalization_mask": mask.unsqueeze(0),
         "n_frames": n_frames,
         "n_samples": n_samples,
         "feature_shape": feature_shape,
@@ -706,10 +604,9 @@ def save_feature_normalization(
     output_root: str | Path,
     samples: pl.DataFrame,
     name: str,
-    representation: str,
+    representation: Representation,
     split_set: str | None = None,
     split: str | None = None,
-    normalization_mask: np.ndarray | t.Tensor | None = None,
     eps: float = 1e-6,
 ) -> Path:
     """Compute and save normalization stats for a named representation/view."""
@@ -718,16 +615,16 @@ def save_feature_normalization(
     stats = compute_feature_normalization(
         output_root=output_root,
         samples=samples,
-        normalization_mask=normalization_mask,
+        representation=representation,
         eps=eps,
     )
     stats |= {
         "name": name,
-        "representation": representation,
+        "representation": representation.name,
         "split_set": split_set,
         "split": split,
     }
 
-    path = _normalization_path(output_root, representation, name)
+    path = _normalization_path(output_root, representation.name, name)
     t.save(stats, path)
     return path

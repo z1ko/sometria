@@ -7,6 +7,7 @@ import polars as pl
 from pathlib import Path
 
 from sometria.catalog import MotionViewSpec, build_motion_view
+from sometria.representation import Representation
 
 
 class RandomWindowCollate:
@@ -57,10 +58,12 @@ class MotionDataset(t.utils.data.Dataset):
         root_folder: str | Path,
         samples: pl.DataFrame,
         normalization_path: str | Path,
+        representation: Representation,
     ) -> None:
         super().__init__()
         self.root_folder = Path(root_folder)
         self.samples = samples
+        self.representation = representation
         self.normalization_path = self._resolve_normalization_path(normalization_path)
 
         if not self.normalization_path.exists():
@@ -69,18 +72,10 @@ class MotionDataset(t.utils.data.Dataset):
                 "Create them during preprocessing and pass the path here."
             )
 
-        stats = t.load(self.normalization_path, weights_only=True)
-        self.mean = stats["mean"].float()
-        self.std = stats["std"].float()
-        self.normalization_mask = stats.get(
-            "normalization_mask",
-            t.ones_like(self.mean, dtype=t.bool),
-        ).bool()
-        if self.normalization_mask.shape != self.mean.shape:
-            raise ValueError(
-                f"normalization_mask has shape {tuple(self.normalization_mask.shape)}, "
-                f"but mean has shape {tuple(self.mean.shape)}."
-            )
+        payload = t.load(self.normalization_path, weights_only=True)
+        # Only mean/std are kept: which slots they apply to is the representation's,
+        # not the stats file's, so the stored normalization_mask is ignored.
+        self.stats = {"mean": payload["mean"].float(), "std": payload["std"].float()}
 
     def _resolve_normalization_path(self, normalization_path: str | Path) -> Path:
         path = Path(normalization_path)
@@ -99,20 +94,15 @@ class MotionDataset(t.utils.data.Dataset):
         )
 
         features = sample["features"].float()
-        if features.shape[1:] != self.mean.shape[1:]:
+        expected = self.stats["mean"].shape[1:]
+        if features.shape[1:] != expected:
             raise ValueError(
                 f"{row['motion_path']} has feature shape {tuple(features.shape[1:])}, "
-                f"but normalization stats expect {tuple(self.mean.shape[1:])}."
+                f"but normalization stats expect {tuple(expected)}."
             )
 
-        normalized_features = t.where(
-            self.normalization_mask,
-            (features - self.mean) / self.std,
-            features,
-        )
-
         return {
-            "features": normalized_features,
+            "features": self.representation.to_model(features, self.stats),
             "time": sample["time"],
             "sample_id": row["sample_id"],
             "source_dataset": row["source_dataset"],
@@ -139,6 +129,11 @@ class MotionDataModule(L.LightningDataModule):
             raise ValueError("config.dataloader.normalization is required.")
         self.normalization_path = Path(normalization)
 
+        human = config.dataloader.get("human")
+        if human is None:
+            raise ValueError("config.dataloader.human is required.")
+        self.representation = Representation.from_config(human)
+
         self.train_spec = MotionViewSpec(
             split_set=config.dataloader.train.split_set,
             split=config.dataloader.train.split,
@@ -160,11 +155,13 @@ class MotionDataModule(L.LightningDataModule):
                 self.root_folder,
                 train_samples,
                 normalization_path=self.normalization_path,
+                representation=self.representation,
             )
             self.val_dataset = MotionDataset(
                 self.root_folder,
                 val_samples,
                 normalization_path=self.normalization_path,
+                representation=self.representation,
             )
         
 
