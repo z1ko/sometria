@@ -21,6 +21,7 @@ import polars as pl
 CATALOG = "motion_catalog.parquet"
 ANNOTATIONS = "annotations.parquet"
 SPLITS = "splits.parquet"
+VOCABULARY = "label_vocabulary.parquet"
 TABLES_DIR = "tables"
 
 @dataclass(frozen=True)
@@ -96,6 +97,34 @@ def load_splits(root: str | Path) -> pl.DataFrame:
                 "split": pl.String,
             }
         )
+
+
+def load_label_vocabulary(root: str | Path, label_set: str | None = None) -> pl.DataFrame:
+    """Load optional label vocabularies, or an empty table with the expected schema.
+
+    A vocabulary fixes which labels a benchmark scores and what integer each maps to. It is
+    kept apart from ``annotations`` because the two answer different questions: annotations say
+    what a sample is, a vocabulary says which answers are admissible and in what order. Labels
+    observed in the data but absent from the vocabulary are out of scope for that benchmark,
+    not errors.
+    """
+
+    path = table_path(root, VOCABULARY)
+    if path.exists():
+        table = pl.read_parquet(path)
+        if label_set is not None:
+            table = table.filter(pl.col("label_set") == label_set)
+        return table
+
+    return pl.DataFrame(
+        schema={
+            "label_source": pl.String,
+            "label_set": pl.String,
+            "ontology": pl.String,
+            "label": pl.String,
+            "label_index": pl.Int64,
+        }
+    )
 
 
 def build_motion_view(root: str | Path, spec: MotionViewSpec) -> pl.DataFrame:

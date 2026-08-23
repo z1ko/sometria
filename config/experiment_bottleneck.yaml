@@ -4,7 +4,7 @@ dataloader:
   normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_train_clean.pt
   batch_size: 8
   num_workers: 4
-  window_frames: 256
+  window_frames: 240
 
   train:
     split_set: pretrain_v1

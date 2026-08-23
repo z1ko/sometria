@@ -31,7 +31,7 @@ import glob
 import tqdm
 import yaml
 
-from sometria.catalog import CATALOG, SPLITS
+from sometria.catalog import ANNOTATIONS, CATALOG, SPLITS, VOCABULARY
 from sometria.splits import babel_key, sample_key
 
 # NOTE: Hardcoded paths, no need for more complexity
@@ -424,6 +424,146 @@ def import_babel_splits(
         _table_path(output_root, SPLITS),
         splits,
         keys=["sample_id", "split_set"],
+    )
+
+
+# BABEL carries three parallel vocabularies per segment: the annotator's free text, its
+# processed form, and zero or more entries from the action taxonomy. They are kept as separate
+# rows under `ontology` rather than as columns, so a downstream probe can ask for exactly one
+# vocabulary without having to know the others exist.
+BABEL_ONTOLOGIES = ("raw", "proc", "act_cat")
+
+
+def _babel_annotation_rows(sequence: dict) -> list[dict]:
+    """Flatten one BABEL sequence into annotation rows, one per (segment, ontology, label).
+
+    ``seq_ann`` labels describe the whole take and are emitted spanning ``0..dur``.
+    ``frame_ann`` is absent for roughly 40% of sequences and carries its own spans. ``act_cat``
+    is null for every label in BABEL's test split, so an ontology can legitimately contribute
+    no rows at all.
+    """
+
+    rows = []
+    spans = [("sequence", sequence.get("seq_ann"), 0.0, sequence.get("dur"))]
+    spans.append(("frame", sequence.get("frame_ann"), None, None))
+
+    for label_type, annotation, default_start, default_end in spans:
+        if not annotation:
+            continue
+        for label in annotation["labels"]:
+            start = default_start if label_type == "sequence" else label.get("start_t")
+            end = default_end if label_type == "sequence" else label.get("end_t")
+            values = {
+                "raw": [label.get("raw_label")],
+                "proc": [label.get("proc_label")],
+                "act_cat": label.get("act_cat") or [],
+            }
+            for ontology in BABEL_ONTOLOGIES:
+                for value in values[ontology]:
+                    if value is None:
+                        continue
+                    rows.append(
+                        {
+                            "babel_match_key": babel_key(sequence["feat_p"]),
+                            "label_type": label_type,
+                            "ontology": ontology,
+                            "start_t": None if start is None else float(start),
+                            "end_t": None if end is None else float(end),
+                            "label": value,
+                        }
+                    )
+    return rows
+
+
+def import_babel_annotations(
+    *,
+    output_root: str | Path,
+    babel_root: str | Path,
+    label_source: str = "BABEL",
+) -> pl.DataFrame:
+    """Import BABEL action labels for already-imported samples.
+
+    Split membership lives in ``splits.parquet`` and is imported separately by
+    ``import_babel_splits``; this writes the labels themselves into ``annotations.parquet``
+    so a sample can belong to a split whether or not its labels are available. Sequences that
+    do not match a catalog row are dropped, as are labels BABEL withholds.
+    """
+
+    output_root = Path(output_root)
+    babel_root = Path(babel_root)
+
+    catalog = pl.read_parquet(_table_path(output_root, CATALOG))
+    catalog_keys = catalog.select(
+        "sample_id",
+        pl.col("source_path")
+        .map_elements(sample_key, return_dtype=pl.String)
+        .alias("babel_match_key"),
+    )
+
+    rows = []
+    for split in ("train", "val", "test"):
+        data = json.loads((babel_root / f"{split}.json").read_text())
+        for sequence in data.values():
+            rows.extend(_babel_annotation_rows(sequence))
+
+    if not rows:
+        raise ValueError(f"No BABEL annotations parsed from {babel_root}.")
+
+    annotations = (
+        pl.DataFrame(rows)
+        .join(catalog_keys, on="babel_match_key", how="inner")
+        .with_columns(pl.lit(label_source).alias("label_source"))
+        .select("sample_id", "label_source", "label_type", "ontology", "start_t", "end_t", "label")
+        .unique()
+    )
+
+    return _upsert_table(
+        _table_path(output_root, ANNOTATIONS),
+        annotations,
+        keys=["sample_id", "label_source", "label_type", "ontology", "start_t", "end_t", "label"],
+    )
+
+
+def import_babel_action_vocabulary(
+    *,
+    output_root: str | Path,
+    babel_root: str | Path,
+    label_source: str = "BABEL",
+    label_set: str = "babel_action_150",
+    filename: str = "action_label_2_idx.json",
+) -> pl.DataFrame:
+    """Import BABEL's action-category vocabulary for downstream evaluation.
+
+    ``action_label_2_idx.json`` fixes the 150 action categories the BABEL benchmarks score and
+    the integer each maps to, ordered by frequency. It is a much smaller set than the labels
+    actually present: the corpus carries a long tail of ``act_cat`` values with no index here,
+    which downstream tasks are expected to drop rather than treat as extra classes.
+    """
+
+    output_root = Path(output_root)
+    mapping = json.loads((Path(babel_root) / filename).read_text())
+
+    vocabulary = pl.DataFrame(
+        {
+            "label_source": [label_source] * len(mapping),
+            "label_set": [label_set] * len(mapping),
+            "ontology": ["act_cat"] * len(mapping),
+            "label": list(mapping.keys()),
+            "label_index": [int(i) for i in mapping.values()],
+        }
+    )
+
+    indices = vocabulary["label_index"]
+    if indices.n_unique() != len(vocabulary) or sorted(indices) != list(range(len(vocabulary))):
+        raise ValueError(
+            f"{filename} indices are not a contiguous 0..{len(vocabulary) - 1} range; "
+            "downstream code assumes they can index a classifier head directly."
+        )
+
+    return _upsert_table(
+        _table_path(output_root, VOCABULARY),
+        vocabulary,
+        keys=["label_source", "label_set", "label"],
     )
 
 

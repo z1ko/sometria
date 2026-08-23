@@ -132,6 +132,7 @@ class MotionDataModule(L.LightningDataModule):
         self.batch_size = config.dataloader.batch_size
         self.num_workers = config.dataloader.get("num_workers", 4)
         self.window_frames = config.dataloader.get("window_frames", 256)
+        self.duration_weighted = config.dataloader.get("duration_weighted", True)
 
         normalization = config.dataloader.get("normalization")
         if normalization is None:
@@ -167,11 +168,12 @@ class MotionDataModule(L.LightningDataModule):
             )
         
 
-    def _loader(self, dataset: MotionDataset, shuffle: bool, drop_last: bool):
+    def _loader(self, dataset: MotionDataset, shuffle: bool, drop_last: bool, sampler=None):
         return t.utils.data.DataLoader(
             dataset=dataset,
             batch_size=self.batch_size,
-            shuffle=shuffle,
+            shuffle=shuffle if sampler is None else False,
+            sampler=sampler,
             drop_last=drop_last,
             num_workers=self.num_workers,
             persistent_workers=self.num_workers > 0,
@@ -179,8 +181,27 @@ class MotionDataModule(L.LightningDataModule):
             collate_fn=RandomWindowCollate(self.window_frames),
         )
 
+    def _duration_weighted_sampler(self, dataset: MotionDataset):
+        """Draw each motion in proportion to its length, one random window per draw.
+
+        Sampling motions uniformly gives a 20 s take and a 4 s take the same one window
+        per epoch, so the short one's frames are seen five times as often. Weighting by
+        frame count equalizes exposure per frame instead of per file. Draws are with
+        replacement, so a long motion contributes several windows per epoch and lands on
+        different offsets each time.
+        """
+
+        frames = dataset.samples["n_frames"].to_list()
+        return t.utils.data.WeightedRandomSampler(
+            weights=frames,
+            # one epoch = enough windows to cover the corpus once, not one per file
+            num_samples=max(1, sum(frames) // self.window_frames),
+            replacement=True,
+        )
+
     def train_dataloader(self):
-        return self._loader(self.train_dataset, drop_last=True, shuffle=True)
+        sampler = self._duration_weighted_sampler(self.train_dataset) if self.duration_weighted else None
+        return self._loader(self.train_dataset, drop_last=True, shuffle=True, sampler=sampler)
 
     def val_dataloader(self):
         return self._loader(self.val_dataset, drop_last=False, shuffle=False)
