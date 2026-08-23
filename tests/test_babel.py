@@ -1,11 +1,11 @@
-"""Run with: python tests/test_preprocess.py"""
+"""Run with: python tests/test_babel.py"""
 
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sometria.preprocess import _babel_annotation_rows
+from sometria.babel import _babel_annotation_rows, babel_key, sample_key
 
 
 SEQUENCE = {
@@ -19,6 +19,22 @@ SEQUENCE = {
         ]
     },
 }
+
+
+# The join between BABEL and our catalog is the fragile part of this module: nine dataset
+# aliases, two filename suffixes, and a case/separator normalization, all reverse-engineered
+# from two AMASS mirrors that disagree about spaces and underscores. When it breaks it does
+# not raise, it just matches fewer rows, so these cases are pinned.
+def test_babel_and_sample_paths_normalize_to_the_same_key():
+    assert babel_key("MPIHDM05/MPI_HDM05/dg/HDM_dg_03-11_03_120_poses.npz") == sample_key(
+        "HDM05/dg/HDM_dg_03-11_03_120_stageii.csv"
+    )
+    # spaces, dashes and underscores all get stripped
+    assert babel_key("ACCAD/ACCAD/Female1Gestures_c3d/D3 - Conversation Gestures_poses.npz") == sample_key(
+        "ACCAD/Female1Gestures_c3d/D3_-_Conversation_Gestures_stageii.csv"
+    )
+    # only the trailing _poses is a suffix; the one inside the name survives
+    assert babel_key("MPImosh/MPI_mosh/50022/stretch_poses_poses.npz") == "MoSh/50022/stretchposes"
 
 
 def test_babel_rows_span_sequence_and_frame_labels():
