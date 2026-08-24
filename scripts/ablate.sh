@@ -19,7 +19,7 @@
 #   EPOCHS=10 ./scripts/ablate.sh mask     short runs while ablating
 #   DRY=1 ./scripts/ablate.sh all          print the commands, run nothing
 #   RUNS=runs/other ./scripts/ablate.sh    somewhere else
-#   PYTHON=... ./scripts/ablate.sh         a different interpreter
+#   PYTHON=python ./scripts/ablate.sh      bypass uv
 
 set -euo pipefail
 
@@ -27,20 +27,15 @@ set -euo pipefail
 # paths below mean the same thing every time.
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-# The project venv rather than whatever `python` happens to be: an IDE terminal often has
-# neither the venv activated nor a bare `python` on PATH at all.
-if [ -z "${PYTHON:-}" ]; then
-    if [ -x .venv/bin/python ]; then
-        PYTHON=.venv/bin/python
-    elif command -v python >/dev/null 2>&1; then
-        PYTHON=python
-    elif command -v python3 >/dev/null 2>&1; then
-        PYTHON=python3
-    else
-        echo "no interpreter found; set PYTHON=/path/to/python" >&2
-        exit 1
-    fi
-fi
+# uv owns this project's environment, so `uv run` syncs it and picks the interpreter --
+# no activated venv required, and an out-of-date lockfile fixes itself rather than
+# silently running against stale dependencies.
+PYTHON=(${PYTHON:-uv run python})
+
+command -v "${PYTHON[0]}" >/dev/null 2>&1 || {
+    echo "${PYTHON[0]} not found; install uv or set PYTHON=/path/to/python" >&2
+    exit 1
+}
 
 CONFIG_PRETRAIN=${CONFIG_PRETRAIN:-config/experiment_mae.yaml}
 CONFIG_PROBE=${CONFIG_PROBE:-config/experiment_linear_probe.yaml}
@@ -73,7 +68,7 @@ pretrain() { # name, overrides...
     done_already "$out" && return 0
 
     echo "pretrain  $name"
-    run "$PYTHON" -m sometria.train --config "$CONFIG_PRETRAIN" --output "$out" \
+    run "${PYTHON[@]}" -m sometria.train --config "$CONFIG_PRETRAIN" --output "$out" \
         $(epochs_override) "$@"
 }
 
@@ -91,7 +86,7 @@ probe() { # name, checkpoint path or the string null
     done_already "$out" && return 0
 
     echo "probe     $name"
-    run "$PYTHON" -m sometria.train --config "$CONFIG_PROBE" --output "$out" \
+    run "${PYTHON[@]}" -m sometria.train --config "$CONFIG_PROBE" --output "$out" \
         $(epochs_override) "model.checkpoint=$ckpt"
 }
 
@@ -140,11 +135,11 @@ stage_report() {
     echo
     echo "=== pretraining ==="
     for column in val/loss val/mse/sin val/mse/tau; do
-        "$PYTHON" scripts/results.py "$RUNS/pretrain" "$column" || true
+        "${PYTHON[@]}" scripts/results.py "$RUNS/pretrain" "$column" || true
         echo
     done
     echo "=== probes ($METRIC) ==="
-    "$PYTHON" scripts/results.py "$RUNS/probe" "$METRIC" || true
+    "${PYTHON[@]}" scripts/results.py "$RUNS/probe" "$METRIC" || true
 }
 
 case "${1:-all}" in
