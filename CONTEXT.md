@@ -134,7 +134,23 @@ distribution by `softmax(score / (max * tau))` and drawn without replacement by 
 top-k. `tau` interpolates: small sharpens toward deterministic top-k, large flattens
 toward uniform, `<= 0` plain random masking, which makes ablation baseline
 same function rather than second code path.
+
+Configured by `MaskSpec` — `mask_ratio`, `tau`, `score_channels` — validated once at
+construction, travelling in checkpoint hparams as plain fields, mapped from a YAML
+`masking:` block. Sits beside the backbone spec, not inside a **Pretext objective**:
+what gets held out is not what gets predicted, and both objectives mask the same way.
 _Avoid_: importance sampling, saliency masking, hard mining
+
+**Masked window**:
+One window already split: its patches, its **Context** and **Target** indices, its own
+time-patch count, and which targets are real frames rather than padding. Built once per
+step by `mask_window` and handed to whichever **Pretext objective** asked for it, which
+adds only what it predicts — patch values, their temporal difference, or the teacher's
+embedding. Holds no parameters and builds no module, so a window can be masked, checked
+and plotted with no backbone constructed. Lives in `models/window.py`, above
+`masking.py` (kept a leaf) and above `EncoderSpec`, which answers the questions about
+the token grid that need no built backbone.
+_Avoid_: batch, masked input, masked sample
 
 **Backbone**:
 `nn.Module` that turns window into tokens and nothing else: patch projection,
@@ -162,8 +178,9 @@ _Avoid_: decoder, head, projection MLP
 
 **Pretext objective**:
 Self-supervised training task over a backbone: what hidden, what predicted, what
-loss is. One `LightningModule` per objective under `models/` — masked reconstruction today,
-JEPA later. MAE and MAMP *not* separate objectives: one
+loss is. One `LightningModule` per objective under `models/`, over a shared
+**Masked window**: masked reconstruction and JEPA today. MAE and MAMP *not* separate
+objectives: one
 `MaskedMotionAutoencoder` at two configurations, differing in `tau` (uniform vs motion-aware
 masking) and `target` (reconstruct input vs predict its temporal difference). Both follow
 reference in taking motion target by differencing *the input the encoder sees*

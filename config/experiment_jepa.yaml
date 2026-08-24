@@ -30,12 +30,15 @@ encoder:
   mlp_ratio: 4.0
   dropout: 0.0
 
-model:
-  name: jepa
-  predictor_depth: 4     # depth-only asymmetry; width matches the backbone
+# What gets held out.
+masking:
   mask_ratio: 0.25       # target fraction: 322 targets, 968 context tokens
   tau: 0.80
   score_channels: [2]    # representation.indices("vel")
+
+model:
+  name: jepa
+  predictor_depth: 4     # depth-only asymmetry; width matches the backbone
   ema_start: 0.996
   ema_end: 1.0
   lr: 0.001

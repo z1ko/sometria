@@ -4,9 +4,14 @@ The student reads only context tokens. A shallow predictor receives those contex
 context tokens plus learned target slots, and predicts the teacher's full-grid embedding
 at the target indices. The teacher is an EMA copy of the student and is never optimized
 directly.
+
+Splitting the window into **Context** and **Target** belongs to
+:mod:`sometria.models.window`; what lives here is the two backbones, the predictor, and
+the EMA.
 """
 
 from copy import deepcopy
+from dataclasses import asdict
 
 import lightning as L
 import torch as t
@@ -17,10 +22,17 @@ from sometria.architecture.encoder import (
     MotionTransformerEncoder,
     as_backbone,
     backbone_hparam,
+    transformer_stack,
 )
 from sometria.architecture.pos_embed import PositionalEncoding
 from sometria.architecture.scheduler import lr_schedule
-from sometria.masking import MaskIndices, motion_aware_mask, patchify, token_validity
+from sometria.masking import MaskSpec, as_mask_spec
+from sometria.models.window import MaskedWindow, mask_window, masked_token_mse
+
+# JEPA holds out a quarter of the window where masked reconstruction holds out nine
+# tenths: its target is an embedding the teacher computed from the whole grid, not a
+# patch the decoder has to invent.
+DEFAULT_MASK = MaskSpec(mask_ratio=0.25, tau=0.80, score_channels=(2,))
 
 
 class MotionPredictor(nn.Module):
@@ -33,19 +45,8 @@ class MotionPredictor(nn.Module):
         self.spec = spec
         self.mask_token = nn.Parameter(t.zeros(1, 1, spec.d_model))
         self.position = PositionalEncoding(time_patches, num_dofs, spec.d_model)
+        self.blocks = transformer_stack(spec, depth)
 
-        layer = nn.TransformerEncoderLayer(
-            d_model=spec.d_model,
-            nhead=spec.num_heads,
-            dim_feedforward=int(spec.d_model * spec.mlp_ratio),
-            dropout=spec.dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.blocks = nn.TransformerEncoder(
-            layer, num_layers=depth, norm=nn.LayerNorm(spec.d_model), enable_nested_tensor=False
-        )
         nn.init.trunc_normal_(self.mask_token, std=0.02)
 
     def forward(
@@ -83,11 +84,9 @@ class MotionJEPA(L.LightningModule):
     def __init__(
         self,
         backbone: MotionTransformerEncoder | EncoderSpec | dict | None = None,
+        mask: MaskSpec | dict | None = None,
         *,
         predictor_depth: int = 4,
-        mask_ratio: float = 0.25,
-        tau: float = 0.80,
-        score_channels: tuple[int, ...] = (2,),
         ema_start: float = 0.996,
         ema_end: float = 1.0,
         lr: float = 1e-3,
@@ -98,20 +97,15 @@ class MotionJEPA(L.LightningModule):
         super().__init__()
 
         backbone = as_backbone(backbone)
-        if not 0.0 < mask_ratio < 1.0:
-            raise ValueError("mask_ratio must be between 0 and 1 for JEPA.")
-        if tau > 0 and not score_channels:
-            raise ValueError("motion-aware masking needs at least one score channel.")
+        mask = as_mask_spec(mask, DEFAULT_MASK)
         if not 0.0 <= ema_start <= ema_end <= 1.0:
             raise ValueError("EMA values must satisfy 0 <= ema_start <= ema_end <= 1.")
 
         self.save_hyperparameters(
             {
                 "backbone": backbone_hparam(backbone),
+                "mask": asdict(mask),
                 "predictor_depth": predictor_depth,
-                "mask_ratio": mask_ratio,
-                "tau": tau,
-                "score_channels": tuple(score_channels),
                 "ema_start": ema_start,
                 "ema_end": ema_end,
                 "lr": lr,
@@ -126,9 +120,7 @@ class MotionJEPA(L.LightningModule):
         self.teacher.requires_grad_(False)
         self.predictor = MotionPredictor(backbone.spec, depth=predictor_depth)
 
-        self.mask_ratio = mask_ratio
-        self.tau = tau
-        self.score_channels = tuple(score_channels)
+        self.mask = mask
         self.ema_start = ema_start
         self.ema_end = ema_end
         self.lr = lr
@@ -141,70 +133,43 @@ class MotionJEPA(L.LightningModule):
         features: t.Tensor,
         valid: t.Tensor | None = None,
         generator: t.Generator | None = None,
-    ) -> tuple[t.Tensor, t.Tensor, t.Tensor, MaskIndices]:
-        """Return ``(prediction, teacher_target, target_valid, mask)`` over target tokens."""
+    ) -> tuple[t.Tensor, t.Tensor, MaskedWindow]:
+        """Return ``(prediction, teacher_target, window)`` over target tokens."""
 
-        spec = self.student.spec
-        patches = self.student.time_patches(features.shape[1])
-        tokens_in = patchify(features, spec.patch_size)
-        values = tokens_in.flatten(start_dim=-2)
-
-        mask = motion_aware_mask(
-            tokens_in,
-            score_channels=self.score_channels,
-            mask_ratio=self.mask_ratio,
-            tau=self.tau,
-            valid=valid,
-            generator=generator,
-        )
-        target_valid = (
-            t.ones(mask.targets.shape, dtype=t.bool, device=values.device)
-            if valid is None else _gather_tokens(
-                token_validity(valid, spec.patch_size, values.shape[1]).to(values.device),
-                mask.targets,
-            )
+        window = mask_window(
+            features, self.student.spec, self.mask, valid=valid, generator=generator
         )
         # ponytail: mask_ratio=0.25 gives 322 target slots on a 1290-token window; a
         # padded window with more invalid tokens than that would spill padding into
         # context, but current pretraining excludes short windows and passes valid=None.
 
-        context = self.student.embed_values(values, patches, index=mask.context)
+        context = self.student.embed_values(
+            window.values, window.num_time_patches, index=window.mask.context
+        )
         prediction = self.predictor(
             context,
-            context_idx=mask.context,
-            targets_idx=mask.targets,
-            num_time_patches=patches,
-            target_valid=target_valid,
+            context_idx=window.mask.context,
+            targets_idx=window.mask.targets,
+            num_time_patches=window.num_time_patches,
+            target_valid=window.target_valid,
         )
 
         with t.no_grad():
-            teacher_tokens = self.teacher.embed_values(values, patches, valid=valid)
-            target = _gather_tokens(teacher_tokens, mask.targets)
+            teacher_tokens = self.teacher.embed_values(
+                window.values, window.num_time_patches, valid=valid
+            )
+            target = window.mask.targets_of(teacher_tokens)
 
         self._last_teacher_embed_std = teacher_tokens.std(dim=0, unbiased=False).mean()
 
-        return prediction, target, target_valid, mask
-
-    def prediction_loss(
-        self,
-        prediction: t.Tensor,
-        target: t.Tensor,
-        target_valid: t.Tensor,
-    ) -> t.Tensor:
-        """MSE per target token, ignoring padded targets."""
-
-        if not target_valid.any():
-            return (prediction - target).square().mean() * 0.0
-
-        per_token = (prediction - target).square().mean(dim=-1)
-        return (per_token * target_valid).sum() / target_valid.sum()
+        return prediction, target, window
 
     def _step(self, batch: dict, stage: str) -> t.Tensor:
-        prediction, target, target_valid, mask = self(batch["features"], batch.get("valid"))
-        loss = self.prediction_loss(prediction, target, target_valid)
+        prediction, target, window = self(batch["features"], batch.get("valid"))
+        loss = masked_token_mse(prediction, target, window.target_valid)
         batch_size = batch["features"].shape[0]
         self.log(f"{stage}/loss", loss, prog_bar=True, batch_size=batch_size)
-        self.log(f"{stage}/context_tokens", float(mask.context.shape[1]), batch_size=batch_size)
+        self.log(f"{stage}/context_tokens", float(window.mask.context.shape[1]), batch_size=batch_size)
         self.log(
             f"{stage}/embed_std",
             self._last_teacher_embed_std,
@@ -257,9 +222,3 @@ class MotionJEPA(L.LightningModule):
                 "interval": "step",
             },
         }
-
-
-def _gather_tokens(x: t.Tensor, idx: t.Tensor) -> t.Tensor:
-    if x.ndim == 2:
-        return x.gather(dim=1, index=idx)
-    return x.gather(dim=1, index=idx.unsqueeze(-1).expand(-1, -1, x.shape[-1]))

@@ -3,7 +3,7 @@
 Patch projection, positional encoding, transformer blocks, final norm. No masking
 strategy, no decoder, no mask token, no prediction head, no Lightning -- those belong to
 whichever pretext objective owns this module. Every objective owns one backbone (JEPA
-will own two, which is why "the encoder" is not a usable name here).
+owns two, which is why "the encoder" is not a usable name here).
 
 The architecture travels as an :class:`EncoderSpec`, not as a module. That is what a
 YAML ``encoder:`` block maps to and what a checkpoint's hparams carry, so a downstream
@@ -16,7 +16,7 @@ import torch as t
 import torch.nn as nn
 
 from sometria.architecture.pos_embed import PositionalEncoding
-from sometria.masking import patchify, token_validity
+from sometria.masking import gather_tokens, patchify, token_validity
 
 POOLINGS = ("window", "dof")
 
@@ -60,6 +60,39 @@ class EncoderSpec:
 
         return self.patch_size * self.num_features
 
+    def time_patches(self, frames: int) -> int:
+        """How many time patches a window of ``frames`` frames occupies.
+
+        On the spec rather than on the module: it reads nothing else, and a masked
+        window has to answer it before any backbone is involved.
+        """
+
+        if frames % self.patch_size != 0:
+            raise ValueError(
+                f"window of {frames} frames is not divisible by patch_size {self.patch_size}"
+            )
+        patches = frames // self.patch_size
+        if patches > self.grid_shape[0]:
+            raise ValueError(
+                f"window needs {patches} time patches, but the encoder holds "
+                f"{self.grid_shape[0]}"
+            )
+        return patches
+
+    def check_features(self, features: t.Tensor) -> None:
+        """Raise unless ``(B, T, D, C)`` carries the DOFs and channels this spec expects.
+
+        Checked wherever a window first enters the model -- the backbone's own
+        tokenization and a masked window both -- so a mis-shaped feature tensor is named
+        rather than surfacing as a matmul error inside the projection.
+        """
+
+        _, _, dofs, channels = features.shape
+        if dofs != self.num_dofs:
+            raise ValueError(f"Expected {self.num_dofs} DOFs, got {dofs}.")
+        if channels != self.num_features:
+            raise ValueError(f"Expected {self.num_features} features, got {channels}.")
+
     def pooled_dim(self, pool: str) -> int:
         """Width of :meth:`MotionTransformerEncoder.embed` under one pooling."""
 
@@ -95,6 +128,31 @@ def backbone_hparam(backbone: "MotionTransformerEncoder") -> dict:
     return asdict(backbone.spec)
 
 
+def transformer_stack(spec: EncoderSpec, depth: int) -> nn.TransformerEncoder:
+    """``depth`` pre-norm blocks at this spec's width, plus the final norm.
+
+    The backbone, a masked objective's decoder and JEPA's predictor all want the same
+    block at the same width and differ only in depth, so the two non-obvious keyword
+    arguments are set -- and explained -- in one place.
+    """
+
+    layer = nn.TransformerEncoderLayer(
+        d_model=spec.d_model,
+        nhead=spec.num_heads,
+        dim_feedforward=int(spec.d_model * spec.mlp_ratio),
+        dropout=spec.dropout,
+        activation="gelu",
+        batch_first=True,
+        norm_first=True,
+    )
+    # norm_first blocks leave the residual stream unnormalized, so the final norm is
+    # not optional -- nn.TransformerEncoder only applies one if it is given one.
+    # enable_nested_tensor would silently drop to a fast path that ignores norm_first.
+    return nn.TransformerEncoder(
+        layer, num_layers=depth, norm=nn.LayerNorm(spec.d_model), enable_nested_tensor=False
+    )
+
+
 class MotionTransformerEncoder(nn.Module):
     """Tokenize a window and contextualize its tokens."""
 
@@ -107,39 +165,11 @@ class MotionTransformerEncoder(nn.Module):
         self.projection = nn.Linear(self.spec.token_dim, self.spec.d_model)
         self.position = PositionalEncoding(time_patches, num_dofs, self.spec.d_model)
 
-        layer = nn.TransformerEncoderLayer(
-            d_model=self.spec.d_model,
-            nhead=self.spec.num_heads,
-            dim_feedforward=int(self.spec.d_model * self.spec.mlp_ratio),
-            dropout=self.spec.dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        # norm_first blocks leave the residual stream unnormalized, so the final norm is
-        # not optional -- nn.TransformerEncoder only applies one if it is given one.
-        self.blocks = nn.TransformerEncoder(
-            layer, num_layers=self.spec.depth, norm=nn.LayerNorm(self.spec.d_model), enable_nested_tensor=False
-        )
+        self.blocks = transformer_stack(self.spec, self.spec.depth)
 
     @property
     def grid_shape(self) -> tuple[int, int]:
         return self.spec.grid_shape
-
-    def time_patches(self, frames: int) -> int:
-        """How many time patches a window of ``frames`` frames occupies."""
-
-        if frames % self.spec.patch_size != 0:
-            raise ValueError(
-                f"window of {frames} frames is not divisible by patch_size {self.spec.patch_size}"
-            )
-        patches = frames // self.spec.patch_size
-        if patches > self.spec.grid_shape[0]:
-            raise ValueError(
-                f"window needs {patches} time patches, but the encoder holds "
-                f"{self.spec.grid_shape[0]}"
-            )
-        return patches
 
     def token_values(self, features: t.Tensor) -> t.Tensor:
         """``(B, T, D, C)`` -> ``(B, L, patch_size * C)``, the raw values of every token.
@@ -148,11 +178,7 @@ class MotionTransformerEncoder(nn.Module):
         these same numbers, gathered at the target indices.
         """
 
-        _, _, dofs, channels = features.shape
-        if dofs != self.spec.num_dofs:
-            raise ValueError(f"Expected {self.spec.num_dofs} DOFs, got {dofs}.")
-        if channels != self.spec.num_features:
-            raise ValueError(f"Expected {self.spec.num_features} features, got {channels}.")
+        self.spec.check_features(features)
         return patchify(features, self.spec.patch_size).flatten(start_dim=-2)
 
     def embed_tokens(
@@ -172,7 +198,7 @@ class MotionTransformerEncoder(nn.Module):
 
         return self.embed_values(
             self.token_values(features),
-            self.time_patches(features.shape[1]),
+            self.spec.time_patches(features.shape[1]),
             valid=valid,
             index=index,
         )
@@ -196,7 +222,7 @@ class MotionTransformerEncoder(nn.Module):
             x = x + self.position.get_flat(num_time_patches)
             padding = None if valid is None else ~self._token_valid(valid, values.shape[1])
         else:
-            x = x.gather(dim=1, index=index.unsqueeze(-1).expand(-1, -1, self.spec.d_model))
+            x = gather_tokens(x, index)
             x = x + self.position.gather(index, num_time_patches)
             # A masker forces invalid tokens into its targets, so a context set is
             # already free of padding.

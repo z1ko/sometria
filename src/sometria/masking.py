@@ -24,16 +24,85 @@ import torch as t
 EPS: float = 1e-10
 
 
+def gather_tokens(x: t.Tensor, index: t.Tensor) -> t.Tensor:
+    """Select tokens by flat index, whether or not they carry a feature axis.
+
+    ``index`` is ``(B, n)``; ``x`` is ``(B, L)`` or ``(B, L, width)``. Every caller that
+    holds an index set into the token grid needs this -- the encoder to keep its context
+    subset, an objective to gather its targets -- so it is written once here rather than
+    once per caller.
+    """
+
+    if x.ndim == 2:
+        return x.gather(dim=1, index=index)
+    return x.gather(dim=1, index=index.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+
+
 @dataclass(frozen=True)
 class MaskIndices:
     """The two halves of a masked window, as indices into the flattened token grid.
 
     Disjoint and exhaustive: together they name every token exactly once. Both are
-    ``(batch, n)`` integer tensors suitable for ``torch.gather`` after an ``unsqueeze``.
+    ``(batch, n)`` integer tensors; :meth:`context_of` and :meth:`targets_of` gather a
+    tensor at them, so a caller never writes the expand-and-gather by hand.
     """
 
     context: t.Tensor    # (B, L_keep)        what the encoder sees
     targets: t.Tensor    # (B, L - L_keep)    what the decoder must predict
+
+    def context_of(self, x: t.Tensor) -> t.Tensor:
+        """``x`` at the context indices."""
+
+        return gather_tokens(x, self.context)
+
+    def targets_of(self, x: t.Tensor) -> t.Tensor:
+        """``x`` at the target indices."""
+
+        return gather_tokens(x, self.targets)
+
+
+@dataclass(frozen=True)
+class MaskSpec:
+    """Which tokens get held out, and how sharply.
+
+    Frozen and validated once at construction, and stored in a ``LightningModule``'s
+    hyperparameters as plain fields -- the same round trip :class:`~sometria.architecture
+    .encoder.EncoderSpec` makes, and for the same reasons.
+
+    The defaults are the MAMP configuration; JEPA holds out far less of the window and
+    passes its own.
+    """
+
+    mask_ratio: float = 0.90
+    tau: float = 0.80
+    score_channels: tuple[int, ...] = (2,)      # representation.indices("vel")
+
+    def __post_init__(self) -> None:
+        # A YAML list survives OmegaConf as a list; a spec that compares equal across a
+        # checkpoint round trip has to settle on one type.
+        object.__setattr__(self, "score_channels", tuple(self.score_channels))
+
+        if not 0.0 < self.mask_ratio < 1.0:
+            raise ValueError(
+                f"mask_ratio must be between 0 and 1, got {self.mask_ratio}"
+            )
+        if self.tau > 0 and not self.score_channels:
+            raise ValueError("motion-aware masking needs at least one score channel.")
+
+
+def as_mask_spec(mask: "MaskSpec | dict | None", default: MaskSpec) -> MaskSpec:
+    """Accept a spec, a spec's fields, or nothing, and return a spec.
+
+    The dict form is what comes back out of a checkpoint and what a YAML ``masking:``
+    block maps to; ``None`` means the objective's own default, which differs between
+    masked reconstruction and JEPA.
+    """
+
+    if isinstance(mask, MaskSpec):
+        return mask
+    if isinstance(mask, dict):
+        return MaskSpec(**mask)
+    return default
 
 
 def patchify(features: t.Tensor, patch_size: int) -> t.Tensor:

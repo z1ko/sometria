@@ -9,8 +9,10 @@ import torch as t
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sometria.architecture.encoder import EncoderSpec
+from sometria.masking import MaskSpec
 from sometria.downstream.classifier import MotionWindowClassifier
 from sometria.models.jepa import MotionJEPA
+from sometria.models.window import masked_token_mse
 
 SPEC = EncoderSpec(d_model=32, depth=1, num_heads=4)
 NUM_DOFS = SPEC.num_dofs
@@ -23,20 +25,22 @@ def _features(batch=2, frames=240, seed=0):
     return t.randn(batch, frames, NUM_DOFS, NUM_FEATURES, generator=g)
 
 
-def _model(**kwargs):
-    return MotionJEPA(SPEC, predictor_depth=1, mask_ratio=0.25, **kwargs)
+def _model(mask_ratio=0.25, tau=0.80, score_channels=(2,), **kwargs):
+    mask = MaskSpec(mask_ratio=mask_ratio, tau=tau, score_channels=score_channels)
+    return MotionJEPA(SPEC, mask, predictor_depth=1, **kwargs)
 
 
 def test_jepa_predicts_teacher_embeddings_at_target_indices():
     model = _model()
     x = _features()
-    prediction, target, target_valid, mask = model(x, generator=t.Generator().manual_seed(0))
+    prediction, target, window = model(x, generator=t.Generator().manual_seed(0))
+    mask = window.mask
 
     assert prediction.shape == target.shape == (2, mask.targets.shape[1], SPEC.d_model)
-    assert target_valid.shape == mask.targets.shape
-    assert mask.context.shape[1] == round(NUM_TOKENS * (1.0 - model.mask_ratio))
+    assert window.target_valid.shape == mask.targets.shape
+    assert mask.context.shape[1] == round(NUM_TOKENS * (1.0 - model.mask.mask_ratio))
     assert mask.context.shape[1] + mask.targets.shape[1] == NUM_TOKENS
-    assert model.prediction_loss(prediction, target, target_valid).isfinite()
+    assert masked_token_mse(prediction, target, window.target_valid).isfinite()
 
 
 def test_teacher_parameters_are_frozen():
@@ -71,7 +75,8 @@ def test_the_student_never_encodes_a_target_token():
     x = _features(batch=1)
     g = t.Generator().manual_seed(0)
     with t.no_grad():
-        _, _, _, mask = model(x, generator=t.Generator().manual_seed(0))
+        _, _, window = model(x, generator=t.Generator().manual_seed(0))
+        mask = window.mask
         before = model.student.embed_tokens(x, index=mask.context)
 
         scrambled = x.clone()

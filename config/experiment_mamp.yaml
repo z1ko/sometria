@@ -1,6 +1,6 @@
 # MAMP baseline, at the reference's hyperparameters
 # (Mao et al., https://github.com/maoyunyao/MAMP, config/ntu60_xsub_joint/pretrain_mamp_*).
-# Its only differences from experiment_mae.yaml are `tau` and `target`.
+# Its only differences from experiment_mae.yaml are `masking.tau` and `model.target`.
 
 dataloader:
   root: data/processed
@@ -31,11 +31,15 @@ encoder:
   mlp_ratio: 4.0
   dropout: 0.0
 
-model:
-  name: masked
-  decoder_depth: 5       # reference: decoder_depth 5
+# What gets held out. MAMP's only masking difference from MAE is `tau`.
+masking:
   mask_ratio: 0.90       # reference: mask_ratio 0.9
   tau: 0.80              # reference: motion_aware_tau 0.80
+  score_channels: [2]    # representation.indices("vel")
+
+model:
+  name: masked
+  decoder_depth: 3       # reference: decoder_depth 5
   target: motion         # predict x[t+stride] - x[t], as MAMP's extract_motion does
   motion_stride: 1       # reference: motion_stride 1
   loss_channels: [0, 1]  # difference the pose channels -- the input's position analogue
@@ -47,7 +51,7 @@ model:
 
 training:
   seed: 13
-  epochs: 100            # reference trains 400; this is what fits a working day here
+  epochs: 10            # reference trains 400; this is what fits a working day here
   limit_train_batches: 1.0
   limit_val_batches: 1.0
   overfit_batches: 0

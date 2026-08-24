@@ -1,6 +1,6 @@
 # MAE baseline, at the reference's hyperparameters
 # (Mao et al., https://github.com/maoyunyao/MAMP, config/ntu60_xsub_joint/pretrain_mae_*).
-# Its only differences from experiment_mamp.yaml are `tau` and `target`.
+# Its only differences from experiment_mamp.yaml are `masking.tau` and `model.target`.
 
 dataloader:
   root: data/processed
@@ -31,11 +31,15 @@ encoder:
   mlp_ratio: 4.0
   dropout: 0.0
 
+# What gets held out. MAE's only masking difference from MAMP is `tau`.
+masking:
+  mask_ratio: 0.90       # reference: mask_ratio 0.9
+  tau: 0.0               # <= 0: uniform random masking
+  score_channels: [2]    # unread at tau <= 0; representation.indices("vel")
+
 model:
   name: masked
   decoder_depth: 3       # reference MAE: decoder_depth 3
-  mask_ratio: 0.90       # reference: mask_ratio 0.9
-  tau: 0.0               # <= 0: uniform random masking
   target: values         # reconstruct the input, as MAMP's MAE variant does
   loss_channels: [0, 1]  # sin, cos -- pose
   norm_targets: true     # reference: norm_skes_loss True
@@ -46,7 +50,7 @@ model:
 
 training:
   seed: 13
-  epochs: 100            # reference trains 400; this is what fits a working day here
+  epochs: 10            # reference trains 400; this is what fits a working day here
   limit_train_batches: 1.0
   limit_val_batches: 1.0
   overfit_batches: 0

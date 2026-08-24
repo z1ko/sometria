@@ -14,8 +14,12 @@ from sometria.dataset import MotionDataModule
 from sometria.downstream.classifier import MotionWindowClassifier
 from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
+from sometria.masking import MaskSpec
 from sometria.models.jepa import MotionJEPA
 from sometria.models.masked import MaskedMotionAutoencoder
+
+# Every pretext objective takes a backbone and a MaskSpec, and reads the same loader.
+OBJECTIVES = {"masked": MaskedMotionAutoencoder, "jepa": MotionJEPA}
 
 
 def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]:
@@ -23,18 +27,19 @@ def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]
 
     ``config.encoder`` is the backbone spec, kept separate from ``config.model`` because
     the backbone is the thing that transfers: pretraining and downstream name the same
-    architecture, and downstream then loads weights into it.
+    architecture, and downstream then loads weights into it. ``config.masking`` is the
+    same story for what gets held out: every pretext objective masks, and none of them
+    owns the policy. Omit the block and the objective's own default applies.
     """
 
     spec = EncoderSpec(**OmegaConf.to_container(config.encoder, resolve=True))
     model_config = OmegaConf.to_container(config.model, resolve=True)
     name = model_config.pop("name")
 
-    if name == "masked":
-        return MaskedMotionAutoencoder(spec, **model_config), MotionDataModule(config)
-
-    if name == "jepa":
-        return MotionJEPA(spec, **model_config), MotionDataModule(config)
+    if name in OBJECTIVES:
+        masking = config.get("masking")
+        mask = None if masking is None else MaskSpec(**OmegaConf.to_container(masking, resolve=True))
+        return OBJECTIVES[name](spec, mask, **model_config), MotionDataModule(config)
 
     if name == "classifier":
         checkpoint = model_config.pop("checkpoint", None)
