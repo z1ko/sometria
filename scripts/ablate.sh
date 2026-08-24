@@ -6,7 +6,7 @@
 #                                  comparison has to clear to mean anything
 #   ./scripts/ablate.sh signal     probe a random backbone against a pretrained one:
 #                                  is pretraining doing anything at all
-#   ./scripts/ablate.sh mask       mask_ratio 0.60 / 0.75 / 0.90
+#   ./scripts/ablate.sh mask       mask_ratio 0.90 / 0.95 / 0.98
 #   ./scripts/ablate.sh decoder    decoder_depth 1 / 3 / 6
 #   ./scripts/ablate.sh probe      probe every pretraining run that has no probe yet
 #   ./scripts/ablate.sh report     read the tables back
@@ -89,7 +89,11 @@ stage_signal() {
 }
 
 stage_mask() {
-    for ratio in 0.60 0.75 0.90; do
+    # Upward, not downward. At 0.90 the reconstruction loss reaches 0.07 against the ~1.0
+    # a null prediction scores, and gets there in three epochs: ten percent of the grid is
+    # enough to interpolate a joint angle, so the model learns interpolation rather than
+    # anything about motion. The question is how much has to be hidden before it cannot.
+    for ratio in 0.90 0.95 0.98; do
         pretrain "mask_$ratio" "masking.mask_ratio=$ratio"
     done
 }
