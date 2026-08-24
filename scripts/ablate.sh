@@ -20,6 +20,9 @@
 #   DRY=1 ./scripts/ablate.sh all          print the commands, run nothing
 #   RUNS=runs/other ./scripts/ablate.sh    somewhere else
 #   PYTHON=python ./scripts/ablate.sh      bypass uv
+#
+#   CONFIG_PROBE=config/experiment_linear_probe_attentive.yaml PROBE_TAG=_attentive \
+#     EPOCHS=10 ./scripts/ablate.sh probe    the same backbones under a different head
 
 set -euo pipefail
 
@@ -41,6 +44,9 @@ CONFIG_PRETRAIN=${CONFIG_PRETRAIN:-config/experiment_mae.yaml}
 CONFIG_PROBE=${CONFIG_PROBE:-config/experiment_linear_probe.yaml}
 RUNS=${RUNS:-runs/ablation}
 METRIC=${METRIC:-val/macro_map}
+# Probes of the same backbones under a different head go in a sibling directory, so both
+# survive in one tree and stage_report reads them side by side.
+PROBE_TAG=${PROBE_TAG:-}
 EPOCHS=${EPOCHS:-}
 DRY=${DRY:-}
 
@@ -82,7 +88,7 @@ checkpoint_of() {
 
 probe() { # name, checkpoint path or the string null
     local name=$1 ckpt=$2
-    local out="$RUNS/probe/$name"
+    local out="$RUNS/probe$PROBE_TAG/$name"
     done_already "$out" && return 0
 
     echo "probe     $name"
@@ -138,8 +144,12 @@ stage_report() {
         "${PYTHON[@]}" scripts/results.py "$RUNS/pretrain" "$column" || true
         echo
     done
-    echo "=== probes ($METRIC) ==="
-    "${PYTHON[@]}" scripts/results.py "$RUNS/probe" "$METRIC" || true
+    for probes in "$RUNS"/probe*/; do
+        [ -d "$probes" ] || continue
+        echo "=== $(basename "$probes") ($METRIC) ==="
+        "${PYTHON[@]}" scripts/results.py "$probes" "$METRIC" || true
+        echo
+    done
 }
 
 case "${1:-all}" in
