@@ -1,10 +1,8 @@
 """Plain MAE over motion tokens: hide most of the window, reconstruct what was hidden.
 
-The stripped-down sibling of :class:`~sometria.models.masked.MaskedMotionAutoencoder`.
-That class covers MAE and MAMP at once, so reading it means reading two objectives; this
-one is only the first, with every knob the other version carries for MAMP's sake gone:
-the target is always the input's own patch values, the mask is always uniform, and the
-loss scores every channel.
+The sibling of :class:`~sometria.models.mamp.MaskedMotionPredictor`, and the simpler of
+the two: the target is always the input's own patch values, the mask is always uniform,
+and the loss scores every channel. Nothing branches, because nothing here is optional.
 
 The encoder is built here from an
 :class:`~sometria.architecture.encoder.EncoderSpec` rather than being handed in, because

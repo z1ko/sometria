@@ -18,7 +18,7 @@ from sometria.downstream.dataset import LabelledWindows, _tiles
 from sometria.downstream.classifier import MotionLinearClassifier
 from sometria.downstream.labels import window_multi_hot
 from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAveragePrecision
-from sometria.models.masked import MaskedMotionAutoencoder
+from sometria.models.mamp import MaskedMotionPredictor
 
 SPEC = EncoderSpec(d_model=32, depth=1, num_heads=4)
 D = SPEC.num_dofs
@@ -228,7 +228,7 @@ def test_a_probe_leaves_the_backbone_untouched():
 
 
 def test_a_pretrained_backbone_arrives_with_its_weights():
-    objective = MaskedMotionAutoencoder(SPEC, decoder_depth=1)
+    objective = MaskedMotionPredictor(SPEC, decoder_depth=1)
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "pretrain.ckpt"
         t.save(

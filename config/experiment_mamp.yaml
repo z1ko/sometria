@@ -38,9 +38,8 @@ masking:
   score_channels: [2]    # representation.indices("vel")
 
 model:
-  name: masked
+  name: mamp
   decoder_depth: 3       # reference: decoder_depth 5
-  target: motion         # predict x[t+stride] - x[t], as MAMP's extract_motion does
   motion_stride: 1       # reference: motion_stride 1
   loss_channels: [0, 1]  # difference the pose channels -- the input's position analogue
   norm_targets: true     # reference: norm_skes_loss True

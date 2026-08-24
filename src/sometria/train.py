@@ -16,10 +16,15 @@ from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
 from sometria.masking import MaskSpec
 from sometria.models.jepa import MotionJEPA
-from sometria.models.masked import MaskedMotionAutoencoder
+from sometria.models.mae import MaskedAutoencoder
+from sometria.models.mamp import MaskedMotionPredictor
 
-# Every pretext objective takes a backbone and a MaskSpec, and reads the same loader.
-OBJECTIVES = {"masked": MaskedMotionAutoencoder, "jepa": MotionJEPA}
+# Every pretext objective takes an EncoderSpec and a MaskSpec, and reads the same loader.
+OBJECTIVES = {
+    "mae": MaskedAutoencoder,
+    "mamp": MaskedMotionPredictor,
+    "jepa": MotionJEPA,
+}
 
 
 def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]:

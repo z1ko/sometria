@@ -1,6 +1,7 @@
-# Linear probe: the backbone frozen and in eval, pooled over the whole grid, one Linear.
-# Point `checkpoint` at a pretraining run; the backbone spec travels in its hparams, so
-# the `encoder` block below only has to match for a run trained from scratch.
+# The attentive probe: the same frozen backbone as experiment_linear_probe.yaml, read by
+# a factorized attention over the T x D grid instead of a flat mean. It answers whether
+# the DOF axis carries something a mean loses, and its number is only interpretable
+# beside the mean probe's -- the pooler adds ~66k trainable parameters, the mean adds 0.
 
 dataloader:
   root: data/processed
@@ -38,11 +39,10 @@ encoder:
 
 model:
   name: classifier
-  checkpoint: runs/mamp/lightning_logs/version_0/checkpoints/epoch=9-step=7240.ckpt       # e.g. runs/mamp/lightning_logs/version_0/checkpoints/last.ckpt
-  pool: dof           # -> num_dofs * d_model
-  head: linear
-  freeze_backbone: true
-  lr_head: 0.001
+  checkpoint: runs/mamp/lightning_logs/version_1/checkpoints/epoch=8-step=6516.ckpt       # e.g. runs/mamp/lightning_logs/version_0/checkpoints/last.ckpt
+  encoder: teacher    # which submodule of the checkpoint holds the weights
+  pool: attentive_factorized
+  lr: 0.001
 
 training:
   seed: 13

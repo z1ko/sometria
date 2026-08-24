@@ -1,8 +1,7 @@
 """MAMP over motion tokens: hide the parts that move, predict how they move.
 
-The motion half of :class:`~sometria.models.masked.MaskedMotionAutoencoder`, written out
-without the branches, and the sibling of :class:`~sometria.models.mae.MaskedAutoencoder`.
-Two things separate it from that one, and they are the whole of MAMP (Mao et al.,
+The sibling of :class:`~sometria.models.mae.MaskedAutoencoder`. Two things separate it
+from that one, and they are the whole of MAMP (Mao et al.,
 https://github.com/maoyunyao/MAMP):
 
 - **The mask is motion-aware.** Tokens are drawn as targets in proportion to how much
