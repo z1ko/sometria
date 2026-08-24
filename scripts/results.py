@@ -41,6 +41,9 @@ def main() -> None:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else "runs")
     metric = sys.argv[2] if len(sys.argv) > 2 else "val/loss"
 
+    if not root.is_dir():
+        raise SystemExit(f"no such run directory: {root}")
+
     found = {run.name: best(run, metric) for run in sorted(root.iterdir()) if run.is_dir()}
     found = {name: value for name, value in found.items() if value is not None}
     if not found:
