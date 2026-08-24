@@ -19,7 +19,12 @@ import lightning as L
 import torch as t
 import torch.nn as nn
 
-from sometria.architecture.encoder import EncoderSpec, MotionTransformerEncoder
+from sometria.architecture.encoder import (
+    EncoderSpec,
+    MotionTransformerEncoder,
+    as_backbone,
+    backbone_hparam,
+)
 from sometria.architecture.scheduler import lr_schedule
 from sometria.downstream.metrics import WindowMeanAveragePrecision
 from sometria.models.masked import MaskedMotionAutoencoder
@@ -32,7 +37,7 @@ class MotionWindowClassifier(L.LightningModule):
 
     def __init__(
         self,
-        backbone: MotionTransformerEncoder | EncoderSpec | None = None,
+        backbone: MotionTransformerEncoder | EncoderSpec | dict | None = None,
         *,
         num_labels: int = 150,
         pool: str = "window",
@@ -45,14 +50,13 @@ class MotionWindowClassifier(L.LightningModule):
     ) -> None:
         super().__init__()
 
-        if isinstance(backbone, EncoderSpec) or backbone is None:
-            backbone = MotionTransformerEncoder(backbone)
+        backbone = as_backbone(backbone)
         if head not in HEADS:
             raise ValueError(f"head must be one of {HEADS}, got {head!r}")
 
         self.save_hyperparameters(
             {
-                "backbone": backbone.spec,
+                "backbone": backbone_hparam(backbone),
                 "num_labels": num_labels,
                 "pool": pool,
                 "head": head,

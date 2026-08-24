@@ -10,7 +10,7 @@ YAML ``encoder:`` block maps to and what a checkpoint's hparams carry, so a down
 classifier reloads without being told the architecture a second time.
 """
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import torch as t
 import torch.nn as nn
@@ -70,11 +70,29 @@ class EncoderSpec:
         raise ValueError(f"pool must be one of {POOLINGS}, got {pool!r}")
 
 
-# torch.load defaults to weights_only=True, and Lightning's load_from_checkpoint follows
-# it -- so a spec sitting in hparams is refused as an unknown global unless it is named
-# here. Without this line, "load_from_checkpoint(path) with no extra arguments" is not
-# actually true. Safe by inspection: the dataclass holds numbers and nothing else.
-t.serialization.add_safe_globals([EncoderSpec])
+def as_backbone(
+    backbone: "MotionTransformerEncoder | EncoderSpec | dict | None",
+) -> "MotionTransformerEncoder":
+    """Accept a built backbone, a spec, or a spec's fields, and return a backbone.
+
+    The dict form is what comes back out of a checkpoint. Hyperparameters are stored as
+    plain fields rather than as the dataclass itself: Lightning refuses to log a frozen
+    dataclass ("A frozen dataclass was passed to `apply_to_collection`"), and
+    ``torch.load`` defaults to ``weights_only=True``, which rejects any class it has not
+    been told about. A dict travels through both, and through a YAML ``encoder:`` block.
+    """
+
+    if isinstance(backbone, MotionTransformerEncoder):
+        return backbone
+    if isinstance(backbone, dict):
+        return MotionTransformerEncoder(EncoderSpec(**backbone))
+    return MotionTransformerEncoder(backbone)
+
+
+def backbone_hparam(backbone: "MotionTransformerEncoder") -> dict:
+    """The backbone's spec as plain fields, ready for ``save_hyperparameters``."""
+
+    return asdict(backbone.spec)
 
 
 class MotionTransformerEncoder(nn.Module):

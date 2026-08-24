@@ -20,7 +20,12 @@ import lightning as L
 import torch as t
 import torch.nn as nn
 
-from sometria.architecture.encoder import EncoderSpec, MotionTransformerEncoder
+from sometria.architecture.encoder import (
+    EncoderSpec,
+    MotionTransformerEncoder,
+    as_backbone,
+    backbone_hparam,
+)
 from sometria.architecture.pos_embed import PositionalEncoding
 from sometria.architecture.scheduler import lr_schedule
 from sometria.masking import MaskIndices, motion_aware_mask, patchify, token_validity
@@ -31,7 +36,7 @@ class MaskedMotionAutoencoder(L.LightningModule):
 
     def __init__(
         self,
-        backbone: MotionTransformerEncoder | EncoderSpec | None = None,
+        backbone: MotionTransformerEncoder | EncoderSpec | dict | None = None,
         *,
         decoder_depth: int = 2,
         mask_ratio: float = 0.80,
@@ -45,8 +50,7 @@ class MaskedMotionAutoencoder(L.LightningModule):
     ) -> None:
         super().__init__()
 
-        if isinstance(backbone, EncoderSpec) or backbone is None:
-            backbone = MotionTransformerEncoder(backbone)
+        backbone = as_backbone(backbone)
         if not 0.0 < mask_ratio < 1.0:
             raise ValueError("mask_ratio must be between 0 and 1 for masked reconstruction.")
         if tau > 0 and not score_channels:
@@ -56,7 +60,7 @@ class MaskedMotionAutoencoder(L.LightningModule):
         # this is what lets load_from_checkpoint(path) rebuild the backbone unaided.
         self.save_hyperparameters(
             {
-                "backbone": backbone.spec,
+                "backbone": backbone_hparam(backbone),
                 "decoder_depth": decoder_depth,
                 "mask_ratio": mask_ratio,
                 "tau": tau,

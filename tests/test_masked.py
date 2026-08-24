@@ -131,6 +131,9 @@ def test_a_checkpoint_reloads_without_being_told_the_architecture():
 
     assert isinstance(reloaded.backbone, MotionTransformerEncoder)
     assert reloaded.backbone.spec == SPEC
+    # plain fields, not the dataclass: Lightning refuses to log a frozen dataclass, and
+    # torch.load's weights_only default refuses to unpickle one
+    assert isinstance(reloaded.hparams.backbone, dict)
     assert reloaded.hparams.tau == 0.25
     for (name, a), (_, b) in zip(model.state_dict().items(), reloaded.state_dict().items()):
         assert t.equal(a, b), name
