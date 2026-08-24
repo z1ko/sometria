@@ -200,11 +200,13 @@ class MotionTransformerEncoder(nn.Module):
         a 1290-token window twice per step is a whole discarded copy of the batch.
         """
 
-        x = self.projection(values)
+        # Gathered before the projection, not after: at a 90% mask ratio, projecting the
+        # whole grid and then throwing nine tenths of it away is nine tenths of a matmul
+        # over 1290 tokens per step.
         if index is None:
-            x = x + self.position.get_flat(num_time_patches)
+            x = self.projection(values) + self.position.get_flat(num_time_patches)
         else:
-            x = gather_tokens(x, index)
+            x = self.projection(gather_tokens(values, index))
             x = x + self.position.gather(index, num_time_patches)
 
         # No src_key_padding_mask: every token is real, and handing nn.TransformerEncoder
@@ -233,7 +235,10 @@ def load_encoder(checkpoint: str, encoder: str = "teacher") -> MotionTransformer
         raise ValueError(f"encoder must be one of {tuple(ENCODER_PREFIXES)}, got {encoder!r}")
 
     loaded = t.load(checkpoint, map_location="cpu")
-    backbone = MotionTransformerEncoder(EncoderSpec(**loaded["hyper_parameters"]["backbone"]))
+    hparams = loaded["hyper_parameters"]
+    # An objective that builds its own backbone names the spec `spec`, one that is handed
+    # a built backbone names it `backbone`. Both are the same fields.
+    backbone = MotionTransformerEncoder(EncoderSpec(**(hparams.get("spec") or hparams["backbone"])))
 
     state = loaded["state_dict"]
     for prefix in ENCODER_PREFIXES[encoder]:

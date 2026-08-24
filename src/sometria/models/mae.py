@@ -6,12 +6,13 @@ one is only the first, with every knob the other version carries for MAMP's sake
 the target is always the input's own patch values, the mask is always uniform, and the
 loss scores every channel.
 
-The encoder is built here rather than being handed in as a
-:class:`~sometria.architecture.encoder.MotionTransformerEncoder`. This model is one
-encoder and one decoder, both of them plain transformer stacks over the same token grid,
-and holding one of them at arm's length while the other is a plain attribute buys
-nothing. :class:`~sometria.architecture.encoder.EncoderSpec` stays -- it is the shape of
-the token grid, not a module, and it is what the checkpoint carries.
+The encoder is built here from an
+:class:`~sometria.architecture.encoder.EncoderSpec` rather than being handed in, because
+nothing outside chooses it. It stays a
+:class:`~sometria.architecture.encoder.MotionTransformerEncoder` all the same: it is the
+one part of this model that outlives it, and a downstream probe reads it back out of the
+checkpoint by its ``backbone.`` prefix. The decoder, the mask token and the prediction
+head are scaffolding that existed to train those weights.
 
 The encoder sees the context tokens only. The decoder receives the encoded context, a
 learned mask token at every held-out position, and its own positional encoding, and
@@ -23,7 +24,11 @@ from dataclasses import asdict
 import torch as t
 import torch.nn as nn
 
-from sometria.architecture.encoder import EncoderSpec, transformer_stack
+from sometria.architecture.encoder import (
+    EncoderSpec,
+    MotionTransformerEncoder,
+    transformer_stack,
+)
 from sometria.architecture.pos_embed import PositionalEncoding
 from sometria.masking import MaskSpec
 from sometria.models.objective import PretextObjective
@@ -87,10 +92,10 @@ class MaskedAutoencoder(PretextObjective):
         self.norm_targets = norm_targets
         time_patches, num_dofs = spec.grid_shape
 
-        # Encoder: patch values in, contextualized context tokens out.
-        self.projection = nn.Linear(spec.token_dim, spec.d_model)
-        self.encoder_position = PositionalEncoding(time_patches, num_dofs, spec.d_model)
-        self.encoder = transformer_stack(spec, spec.depth)
+        # The encoder is a module rather than three loose fields because it is the one
+        # part of this model that outlives it: a probe loads `backbone.*` out of the
+        # checkpoint and drops everything below. Decoder and mask token are scaffolding.
+        self.backbone = MotionTransformerEncoder(spec)
 
         # Decoder: the whole grid, context tokens where they were, mask tokens elsewhere.
         self.mask_token = nn.Parameter(t.zeros(1, 1, spec.d_model))
@@ -101,16 +106,11 @@ class MaskedAutoencoder(PretextObjective):
         nn.init.normal_(self.mask_token, std=0.02)
 
     def encode(self, window: MaskedWindow) -> t.Tensor:
-        """``(B, L_keep, d_model)`` -- the context tokens, and nothing the decoder predicts.
+        """``(B, L_keep, d_model)`` -- the context tokens, and nothing the decoder predicts."""
 
-        Gathering before the projection rather than after it means only the tokens the
-        encoder keeps are ever projected. No ``src_key_padding_mask``: every token is
-        real, and an all-False mask costs ~35% of an encode by disabling the fused path.
-        """
-
-        x = self.projection(window.mask.context_of(window.values))
-        x = x + self.encoder_position.gather(window.mask.context, window.num_time_patches)
-        return self.encoder(x)
+        return self.backbone.embed_values(
+            window.values, window.num_time_patches, index=window.mask.context
+        )
 
     def forward(
         self,

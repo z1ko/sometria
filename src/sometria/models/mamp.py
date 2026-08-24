@@ -25,9 +25,10 @@ computation. It does not: that channel is signed-log compressed and normalized p
 so its per-frame values are near-unpredictable from context, and the objective explained
 7.7% of its target's variance in 10 epochs where the pose objective explained 98.8%.
 
-Like the MAE sibling, the encoder is built here rather than handed in as a
-:class:`~sometria.architecture.encoder.MotionTransformerEncoder`: this model is one
-encoder and one decoder, both plain transformer stacks over the same token grid.
+Like the MAE sibling, the encoder is built here from an
+:class:`~sometria.architecture.encoder.EncoderSpec` rather than handed in -- and stays a
+:class:`~sometria.architecture.encoder.MotionTransformerEncoder`, because it is the part
+a downstream probe loads back out of the checkpoint.
 """
 
 from dataclasses import asdict
@@ -35,7 +36,11 @@ from dataclasses import asdict
 import torch as t
 import torch.nn as nn
 
-from sometria.architecture.encoder import EncoderSpec, transformer_stack
+from sometria.architecture.encoder import (
+    EncoderSpec,
+    MotionTransformerEncoder,
+    transformer_stack,
+)
 from sometria.architecture.pos_embed import PositionalEncoding
 from sometria.masking import MaskSpec, extract_motion, patchify
 from sometria.models.objective import PretextObjective
@@ -109,10 +114,10 @@ class MaskedMotionPredictor(PretextObjective):
         self.norm_targets = norm_targets
         time_patches, num_dofs = spec.grid_shape
 
-        # Encoder: patch values in, contextualized context tokens out.
-        self.projection = nn.Linear(spec.token_dim, spec.d_model)
-        self.encoder_position = PositionalEncoding(time_patches, num_dofs, spec.d_model)
-        self.encoder = transformer_stack(spec, spec.depth)
+        # The encoder is a module rather than three loose fields because it is the one
+        # part of this model that outlives it: a probe loads `backbone.*` out of the
+        # checkpoint and drops everything below. Decoder and mask token are scaffolding.
+        self.backbone = MotionTransformerEncoder(spec)
 
         # Decoder: the whole grid, context tokens where they were, mask tokens elsewhere.
         self.mask_token = nn.Parameter(t.zeros(1, 1, spec.d_model))
@@ -126,16 +131,11 @@ class MaskedMotionPredictor(PretextObjective):
         nn.init.normal_(self.mask_token, std=0.02)
 
     def encode(self, window: MaskedWindow) -> t.Tensor:
-        """``(B, L_keep, d_model)`` -- the context tokens, and nothing the decoder predicts.
+        """``(B, L_keep, d_model)`` -- the context tokens, and nothing the decoder predicts."""
 
-        Gathering before the projection rather than after it means only the tokens the
-        encoder keeps are ever projected. No ``src_key_padding_mask``: every token is
-        real, and an all-False mask costs ~35% of an encode by disabling the fused path.
-        """
-
-        x = self.projection(window.mask.context_of(window.values))
-        x = x + self.encoder_position.gather(window.mask.context, window.num_time_patches)
-        return self.encoder(x)
+        return self.backbone.embed_values(
+            window.values, window.num_time_patches, index=window.mask.context
+        )
 
     def motion_target(self, features: t.Tensor) -> t.Tensor:
         """``(B, L, patch_size * len(loss_channels))`` -- the window's own temporal difference.
