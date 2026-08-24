@@ -67,22 +67,6 @@ def test_poolings_have_the_widths_the_spec_advertises():
     assert SPEC.pooled_dim("dof") == D * SPEC.d_model
 
 
-def test_pooling_ignores_invalid_tokens():
-    """A padded half must not pull the mean toward whatever the padding embeds to."""
-
-    encoder = MotionTransformerEncoder(SPEC).eval()
-    x = _features(batch=1)
-    valid = t.ones(1, 240, dtype=t.bool)
-    valid[0, 120:] = False
-
-    with t.no_grad():
-        masked = encoder.embed(x, pool="window", valid=valid)
-        # the same content, with the padding actually absent
-        short = encoder.embed(x[:, :120], pool="window")
-
-    assert t.allclose(masked, short, atol=1e-5)
-
-
 def test_dof_pooling_keeps_the_joint_axis_separate():
     """Slice ``d`` of the pooled vector is DOF ``d`` averaged over time, nothing else."""
 

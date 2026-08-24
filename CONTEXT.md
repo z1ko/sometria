@@ -105,7 +105,11 @@ by `WindowCollate`. Window what model sees; a
 patch how that window tokenized. Samples shorter than a window excluded by
 `MotionViewSpec.min_frames`, not padded — 22.8% of `pretrain_v1/train` samples but only
 8.0% of its frames, and zero-padded window would fill context set with
-tokens scoring as motionless. Offsets random while training,
+tokens scoring as motionless. `WindowCollate` raises on shorter motion rather than
+padding it, so decision has one enforcement and one backstop, not a quiet second path.
+Nothing downstream carries frame-validity mask: every token model sees a real
+frame, so no `src_key_padding_mask` reaches attention — handing `nn.TransformerEncoder`
+all-False mask cost ~29% of JEPA forward. Offsets random while training,
 deterministic while evaluating: random validation crop moves metric for reasons
 unrelated to model, and `ModelCheckpoint` then selects on crop luck.
 _Avoid_: clip, crop, patch
@@ -142,8 +146,8 @@ what gets held out is not what gets predicted, and both objectives mask the same
 _Avoid_: importance sampling, saliency masking, hard mining
 
 **Masked window**:
-One window already split: its patches, its **Context** and **Target** indices, its own
-time-patch count, and which targets are real frames rather than padding. Built once per
+One window already split: its patches, its **Context** and **Target** indices, and its
+own time-patch count. Built once per
 step by `mask_window` and handed to whichever **Pretext objective** asked for it, which
 adds only what it predicts — patch values, their temporal difference, or the teacher's
 embedding. Holds no parameters and builds no module, so a window can be masked, checked

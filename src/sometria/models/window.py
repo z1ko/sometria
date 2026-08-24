@@ -16,13 +16,7 @@ from dataclasses import dataclass
 import torch as t
 
 from sometria.architecture.encoder import EncoderSpec
-from sometria.masking import (
-    MaskIndices,
-    MaskSpec,
-    motion_aware_mask,
-    patchify,
-    token_validity,
-)
+from sometria.masking import MaskIndices, MaskSpec, motion_aware_mask, patchify
 
 
 @dataclass(frozen=True)
@@ -37,7 +31,6 @@ class MaskedWindow:
     patches: t.Tensor          # (B, L, patch_size, C)  one DOF over patch_size frames
     mask: MaskIndices
     num_time_patches: int      # this window's, which a short window makes smaller
-    target_valid: t.Tensor     # (B, L - L_keep) bool   which targets are real frames
 
     @property
     def values(self) -> t.Tensor:
@@ -57,7 +50,6 @@ def mask_window(
     spec: EncoderSpec,
     mask: MaskSpec,
     *,
-    valid: t.Tensor | None = None,
     generator: t.Generator | None = None,
 ) -> MaskedWindow:
     """Split ``(B, T, D, C)`` into context and targets under one :class:`MaskSpec`.
@@ -66,65 +58,41 @@ def mask_window(
     which projects them -- patchifying a 1290-token window twice per step is a whole
     discarded copy of the batch.
 
-    ``valid`` is an optional ``(B, T)`` frame mask. Tokens covering any padded frame sort
-    last, so they fill the targets before any real token does -- but only up to the target
-    budget: a window with more invalid tokens than ``mask_ratio * L`` spills the remainder
-    into the context, where the backbone's index path does not mask them. Callers that
-    exclude short samples up front (``MotionViewSpec.min_frames``) pass ``None`` and never
-    meet this; anything that starts padding windows has to check the budget covers them.
+    Every token is real. A **Window** is a crop of a motion long enough to fill it:
+    ``MotionViewSpec.min_frames`` drops the shorter ones on every split, and
+    ``WindowCollate`` refuses one if it ever gets that far.
     """
 
     spec.check_features(features)
-    num_time_patches = spec.time_patches(features.shape[1])
     patches = patchify(features, spec.patch_size)
-    length = patches.shape[1]
-
-    indices = motion_aware_mask(
-        patches,
-        score_channels=mask.score_channels,
-        mask_ratio=mask.mask_ratio,
-        tau=mask.tau,
-        valid=valid,
-        generator=generator,
-    )
-
-    target_valid = (
-        t.ones(indices.targets.shape, dtype=t.bool, device=features.device)
-        if valid is None
-        else indices.targets_of(token_validity(valid, spec.patch_size, length).to(features.device))
-    )
 
     return MaskedWindow(
         spec=spec,
         patches=patches,
-        mask=indices,
-        num_time_patches=num_time_patches,
-        target_valid=target_valid,
+        mask=motion_aware_mask(
+            patches,
+            score_channels=mask.score_channels,
+            mask_ratio=mask.mask_ratio,
+            tau=mask.tau,
+            generator=generator,
+        ),
+        num_time_patches=spec.time_patches(features.shape[1]),
     )
 
 
-def masked_token_mse(
-    prediction: t.Tensor,
-    target: t.Tensor,
-    target_valid: t.Tensor,
-) -> t.Tensor:
-    """Squared error over target tokens, ignoring the ones that are padding.
+def masked_token_mse(prediction: t.Tensor, target: t.Tensor) -> t.Tensor:
+    """Squared error over target tokens.
 
-    Mean per token, then mean over valid target tokens: a token counts once whatever its
-    width, which is what makes the number comparable between an objective predicting two
-    channels of a patch and one predicting a ``d_model`` embedding.
+    Named rather than inlined for the empty-set guard: a ``mask_ratio`` small enough to
+    round every token into the context is a legal :class:`~sometria.masking.MaskSpec`,
+    and the mean of an empty tensor is NaN. Summing rather than replacing with a constant
+    keeps a graph the backward pass can be walked through.
     """
 
-    if not target_valid.any():
-        # Multiplied rather than replaced by a constant: a window with no real target
-        # still has to hand back something the graph can be walked back through. Summed
-        # rather than meaned because the target set can be empty outright -- a mask_ratio
-        # small enough to round every token into the context is a legal MaskSpec -- and
-        # the mean of an empty tensor is NaN.
+    if prediction.numel() == 0:
         return prediction.sum() * 0.0
 
-    per_token = (prediction - target).square().mean(dim=-1)
-    return (per_token * target_valid).sum() / target_valid.sum()
+    return (prediction - target).square().mean()
 
 
 def standardize_tokens(target: t.Tensor, eps: float = 1.0e-6) -> t.Tensor:

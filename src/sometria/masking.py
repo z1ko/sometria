@@ -126,36 +126,12 @@ def patchify(features: t.Tensor, patch_size: int) -> t.Tensor:
     return patches.reshape(B, -1, patch_size, C)
 
 
-def token_validity(valid: t.Tensor, patch_size: int, length: int) -> t.Tensor:
-    """``(B, T)`` frame mask -> ``(B, length)`` token mask.
-
-    A token is valid only if *every* frame it covers is real: a patch that is half
-    padding is not half usable. The same reduction is needed by the masker (to keep
-    padding out of the context set), by the encoder's pooling (so a mean is taken over
-    real tokens only) and by the reconstruction loss, so it lives here rather than being
-    written out three times.
-
-    ``length`` is the flat token count ``TP * D``; the per-time-patch mask is repeated
-    across the DOF axis, which is what ``t * D + d`` ordering asks for.
-    """
-
-    if valid.shape[1] % patch_size != 0:
-        raise ValueError(
-            f"valid covers {valid.shape[1]} frames, not divisible by patch_size {patch_size}"
-        )
-    usable = valid.reshape(valid.shape[0], -1, patch_size).all(dim=-1)          # (B, TP)
-    if length % usable.shape[1] != 0:
-        raise ValueError(f"{length} tokens is not a whole number of {usable.shape[1]} time patches")
-    return usable.repeat_interleave(length // usable.shape[1], dim=1)
-
-
 def motion_aware_mask(
     patches: t.Tensor,
     *,
     score_channels: tuple[int, ...],
     mask_ratio: float = 0.80,
     tau: float = 0.75,
-    valid: t.Tensor | None = None,
     generator: t.Generator | None = None,
 ) -> MaskIndices:
     """Split a patchified window into context and targets, biased toward motion.
@@ -178,13 +154,11 @@ def motion_aware_mask(
     default a mild preference rather than a hard selection. Lower ``tau`` if you want it
     to bite.
 
-    ``valid`` is an optional ``(B, T)`` frame mask; tokens covering any invalid frame are
-    forced into ``targets`` so a padded window never spends its context budget on
-    padding. Callers that exclude short samples up front (``MotionViewSpec.min_frames``)
-    pass ``None``.
+    Every token is real: a **Window** is a crop of a motion long enough to fill it, never
+    a padded short one. ``MotionViewSpec.min_frames`` enforces that on every split.
     """
 
-    B, L, patch_size, _ = patches.shape
+    B, L, _, _ = patches.shape
     device = patches.device
     # round, not truncate: 1290 * (1.0 - 0.80) is 257.99999... in binary floating point,
     # which would silently hand back one fewer context token than the ratio asks for.
@@ -200,14 +174,7 @@ def motion_aware_mask(
     else:
         noise = t.rand(B, L, device=device, generator=generator)
 
-    if valid is not None:
-        # A token is usable only if every frame it covers is real. +inf sorts it last,
-        # which puts it in targets; masking the noise afterwards keeps +inf out of the
-        # softmax, where it would produce NaN.
-        usable = token_validity(valid, patch_size, L).to(device)
-        noise = noise.masked_fill(~usable, float("inf"))
-
-    order = noise.argsort(dim=-1)          # ascending: quiet and real first, loud last
+    order = noise.argsort(dim=-1)          # ascending: quiet first, loud last
     return MaskIndices(context=order[:, :len_keep], targets=order[:, len_keep:])
 
 

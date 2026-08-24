@@ -11,12 +11,18 @@ from sometria.representation import Representation
 
 
 class WindowCollate:
-    """Collate variable-length motions into fixed-size windows.
+    """Crop each motion in a batch to one fixed-size window.
 
     ``random_offset`` is what separates training from evaluation: a random crop each
     epoch is augmentation while training, but while validating it moves the metric for
     reasons unrelated to the model, and ``ModelCheckpoint(monitor="val/loss")`` then
     selects on crop luck. Evaluation takes the centre of the motion, every epoch.
+
+    A motion shorter than a window is an error here, not something to zero-pad. Padding
+    scores as motionless, so motion-aware masking keeps it and spends the context budget
+    on frames that are not there -- which is why ``MotionViewSpec.min_frames`` drops those
+    samples on every split. This raise is that decision's backstop, so a view built
+    without ``min_frames`` fails by name rather than by training on padding.
     """
 
     def __init__(self, window_frames: int, random_offset: bool = True) -> None:
@@ -27,37 +33,32 @@ class WindowCollate:
 
     def __call__(self, batch: list[dict]) -> dict:
         windows = []
-        valid = []
         sample_ids = []
         source_paths = []
 
         for item in batch:
             features = item["features"]
             n_frames = features.shape[0]
+            if n_frames < self.window_frames:
+                raise ValueError(
+                    f"{item['sample_id']} has {n_frames} frames, fewer than the "
+                    f"{self.window_frames}-frame window. Build the view with "
+                    f"MotionViewSpec(min_frames={self.window_frames})."
+                )
+
+            max_start = n_frames - self.window_frames
+            start = (
+                int(t.randint(max_start + 1, ()).item())
+                if self.random_offset
+                else max_start // 2
+            )
+
+            windows.append(features[start:start + self.window_frames])
             sample_ids.append(item["sample_id"])
             source_paths.append(item["source_path"])
 
-            if n_frames >= self.window_frames:
-                max_start = n_frames - self.window_frames
-                start = (
-                    int(t.randint(max_start + 1, ()).item())
-                    if self.random_offset
-                    else max_start // 2
-                )
-                window = features[start:start + self.window_frames]
-                valid_window = t.ones(self.window_frames, dtype=t.bool)
-            else:
-                window = features.new_zeros((self.window_frames, *features.shape[1:]))
-                window[:n_frames] = features
-                valid_window = t.zeros(self.window_frames, dtype=t.bool)
-                valid_window[:n_frames] = True
-
-            windows.append(window)
-            valid.append(valid_window)
-
         return {
             "features": t.stack(windows),
-            "valid": t.stack(valid),
             "sample_id": sample_ids,
             "source_path": source_paths,
         }
@@ -148,7 +149,7 @@ class MotionDataModule(L.LightningDataModule):
         # Short samples are dropped, not zero-padded: padding scores as motionless, so
         # motion-aware masking keeps it and spends the context budget on frames that are
         # not there. The spec is where that decision is enforced, and it has to reach both
-        # splits or the training path quietly keeps the padding branch alive.
+        # splits -- WindowCollate raises on anything shorter that reaches it.
         self.train_spec = MotionViewSpec(
             split_set=config.dataloader.train.split_set,
             split=config.dataloader.train.split,

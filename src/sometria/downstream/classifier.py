@@ -146,16 +146,16 @@ class MotionWindowClassifier(L.LightningModule):
             self.backbone.eval()
         return self
 
-    def forward(self, features: t.Tensor, valid: t.Tensor | None = None) -> t.Tensor:
+    def forward(self, features: t.Tensor) -> t.Tensor:
         if self.freeze_backbone:
             with t.no_grad():
-                pooled = self.backbone.embed(features, pool=self.pool, valid=valid)
+                pooled = self.backbone.embed(features, pool=self.pool)
         else:
-            pooled = self.backbone.embed(features, pool=self.pool, valid=valid)
+            pooled = self.backbone.embed(features, pool=self.pool)
         return self.head(pooled)
 
     def _step(self, batch: dict, stage: str) -> tuple[t.Tensor, t.Tensor]:
-        logits = self(batch["features"], batch.get("valid"))
+        logits = self(batch["features"])
         loss = self.loss(logits, batch["labels"])
         self.log(f"{stage}/loss", loss, prog_bar=True, batch_size=logits.shape[0])
         return loss, logits

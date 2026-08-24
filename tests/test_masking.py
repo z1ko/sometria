@@ -160,18 +160,6 @@ def test_nonpositive_tau_ignores_motion_and_masks_uniformly():
     assert abs(hits.mean() - 0.5 * draws) < 0.05 * draws
 
 
-def test_padding_is_never_spent_on_context():
-    x = _features(batch=1)
-    valid = t.ones(1, x.shape[1], dtype=t.bool)
-    valid[0, 120:] = False                                   # second half is collate padding
-    x[0, 120:] = 0.0
-
-    m = motion_aware_mask(patchify(x, PATCH), score_channels=VEL, valid=valid, mask_ratio=0.5)
-
-    padded = set(range((120 // PATCH) * D, (240 // PATCH) * D))
-    assert not set(m.context[0].tolist()) & padded
-
-
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

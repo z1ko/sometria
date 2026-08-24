@@ -40,8 +40,7 @@ def test_mae_configuration_predicts_its_target_patches():
     prediction, target, window = model(x, generator=t.Generator().manual_seed(0))
 
     assert prediction.shape == target.shape == (2, window.mask.targets.shape[1], _width(model))
-    assert window.target_valid.shape == window.mask.targets.shape
-    assert model.reconstruction_loss(prediction, target, window.target_valid).isfinite()
+    assert model.reconstruction_loss(prediction, target).isfinite()
 
 
 def test_mamp_configuration_predicts_its_target_patches():
@@ -52,7 +51,7 @@ def test_mamp_configuration_predicts_its_target_patches():
     prediction, target, window = model(x, generator=t.Generator().manual_seed(0))
 
     assert prediction.shape == target.shape == (2, window.mask.targets.shape[1], _width(model))
-    assert model.reconstruction_loss(prediction, target, window.target_valid).isfinite()
+    assert model.reconstruction_loss(prediction, target).isfinite()
 
 
 def test_the_motion_target_is_the_difference_of_the_input_not_a_channel():
@@ -81,23 +80,22 @@ def test_target_normalization_standardizes_each_token_on_its_own():
     model = _model(norm_targets=True, loss_channels=(0,))
     prediction = t.zeros(1, 2, SPEC.patch_size)
     target = t.randn(1, 2, SPEC.patch_size) * 100.0 + 50.0
-    valid = t.ones(1, 2, dtype=t.bool)
 
     # a constant prediction against a standardized target scores its mean square, which
     # is (n-1)/n because torch's var is unbiased -- the reference standardizes the same way
     expected = (SPEC.patch_size - 1) / SPEC.patch_size
-    assert abs(model.reconstruction_loss(prediction, target, valid).item() - expected) < 1e-3
+    assert abs(model.reconstruction_loss(prediction, target).item() - expected) < 1e-3
 
     # and scaling one token by 1000 does not change the loss it contributes
     scaled = target.clone()
     scaled[:, 0] *= 1000.0
     assert abs(
-        model.reconstruction_loss(prediction, scaled, valid).item()
-        - model.reconstruction_loss(prediction, target, valid).item()
+        model.reconstruction_loss(prediction, scaled).item()
+        - model.reconstruction_loss(prediction, target).item()
     ) < 1e-3
 
     off = _model(norm_targets=False, loss_channels=(0,))
-    assert off.reconstruction_loss(prediction, scaled, valid) > 1e4
+    assert off.reconstruction_loss(prediction, scaled) > 1e4
 
 
 def test_the_mask_splits_the_grid_exactly_once():
@@ -152,20 +150,7 @@ def test_loss_scores_only_the_channels_it_was_given():
 
     prediction = t.zeros(1, 4, SPEC.patch_size)
     flat = t.full((1, 4, SPEC.patch_size), 2.0)
-    assert abs(model.reconstruction_loss(prediction, flat, t.ones(1, 4, dtype=t.bool)).item() - 4.0) < 1e-6
-
-
-def test_invalid_target_tokens_are_left_out_of_the_loss():
-    model = _model(tau=0.0)
-    x = _features(batch=1)
-    valid = t.ones(1, 240, dtype=t.bool)
-    valid[0, 120:] = False
-
-    prediction, target, window = model(x, valid, generator=t.Generator().manual_seed(0))
-
-    # padding is forced into targets, and then out of the loss
-    assert not window.target_valid.all()
-    assert model.reconstruction_loss(prediction, target, window.target_valid).isfinite()
+    assert abs(model.reconstruction_loss(prediction, flat).item() - 4.0) < 1e-6
 
 
 def test_a_checkpoint_reloads_without_being_told_the_architecture():

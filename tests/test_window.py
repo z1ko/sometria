@@ -27,13 +27,12 @@ def _features(batch=2, frames=80, seed=0):
     return t.randn(batch, frames, DOFS, SPEC.num_features, generator=g)
 
 
-def _window(features=None, mask=MASK, **kwargs):
+def _window(features=None, mask=MASK):
     return mask_window(
         features if features is not None else _features(),
         SPEC,
         mask,
         generator=t.Generator().manual_seed(0),
-        **kwargs,
     )
 
 
@@ -71,29 +70,6 @@ def test_uniform_masking_needs_no_score_channel():
     assert w.mask.context.shape[1] == TOKENS // 2
 
 
-def test_target_valid_is_all_true_when_no_frame_mask_is_given():
-    w = _window()
-
-    assert w.target_valid.shape == w.mask.targets.shape
-    assert w.target_valid.dtype == t.bool
-    assert w.target_valid.all()
-
-
-def test_padding_is_forced_into_the_targets_and_marked_invalid():
-    """A padded window must never spend its context budget on frames that are not there."""
-
-    valid = t.ones(2, 80, dtype=t.bool)
-    valid[:, 56:] = False                     # 7 of 10 time patches real -> 42 real tokens
-    real = 7 * DOFS
-    w = _window(valid=valid)
-
-    assert w.target_valid.shape == w.mask.targets.shape
-    # the context budget is 30 tokens and 42 are real, so no padding needs to be kept
-    assert (w.mask.context < real).all()
-    # every padded token landed in the targets, and every one of them is marked invalid
-    assert w.target_valid.sum().item() == 2 * (TOKENS // 2 - (TOKENS - real))
-
-
 def test_a_mis_shaped_window_is_named_rather_than_failing_in_a_matmul():
     wrong_dofs = t.randn(2, 80, DOFS + 1, SPEC.num_features)
     try:
@@ -104,24 +80,12 @@ def test_a_mis_shaped_window_is_named_rather_than_failing_in_a_matmul():
         raise AssertionError("expected a ValueError naming the DOF count")
 
 
-def test_masked_token_mse_scores_valid_targets_only():
+def test_masked_token_mse_averages_every_target_token_equally():
     prediction = t.zeros(1, 4, 3)
     target = t.zeros(1, 4, 3)
-    target[0, 0] = 2.0                        # squared error 4 per value, valid
-    target[0, 3] = 100.0                      # invalid: must not reach the loss
-    valid = t.tensor([[True, True, True, False]])
+    target[0, 0] = 2.0                        # squared error 4 per value, one token of four
 
-    loss = masked_token_mse(prediction, target, valid)
-
-    assert t.isclose(loss, t.tensor(4.0 / 3.0))
-
-
-def test_masked_token_mse_survives_a_window_with_no_valid_target():
-    prediction = t.zeros(1, 2, 3, requires_grad=True)
-    loss = masked_token_mse(prediction, t.ones(1, 2, 3), t.zeros(1, 2, dtype=t.bool))
-
-    assert loss.isfinite() and loss.item() == 0.0
-    loss.backward()                           # a zeroed loss still has to be differentiable
+    assert t.isclose(masked_token_mse(prediction, target), t.tensor(1.0))
 
 
 def test_masked_token_mse_survives_an_empty_target_set():
@@ -131,10 +95,10 @@ def test_masked_token_mse_survives_an_empty_target_set():
     assert w.mask.targets.shape[1] == 0
 
     prediction = t.zeros(2, 0, 3, requires_grad=True)
-    loss = masked_token_mse(prediction, t.zeros(2, 0, 3), w.target_valid)
+    loss = masked_token_mse(prediction, t.zeros(2, 0, 3))
 
     assert loss.isfinite() and loss.item() == 0.0
-    loss.backward()
+    loss.backward()                           # a zeroed loss still has to be differentiable
 
 
 def test_standardize_tokens_normalizes_each_token_over_its_own_values():

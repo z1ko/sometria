@@ -37,10 +37,9 @@ def test_jepa_predicts_teacher_embeddings_at_target_indices():
     mask = window.mask
 
     assert prediction.shape == target.shape == (2, mask.targets.shape[1], SPEC.d_model)
-    assert window.target_valid.shape == mask.targets.shape
     assert mask.context.shape[1] == round(NUM_TOKENS * (1.0 - model.mask.mask_ratio))
     assert mask.context.shape[1] + mask.targets.shape[1] == NUM_TOKENS
-    assert masked_token_mse(prediction, target, window.target_valid).isfinite()
+    assert masked_token_mse(prediction, target).isfinite()
 
 
 def test_teacher_parameters_are_frozen():

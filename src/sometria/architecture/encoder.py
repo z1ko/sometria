@@ -16,7 +16,7 @@ import torch as t
 import torch.nn as nn
 
 from sometria.architecture.pos_embed import PositionalEncoding
-from sometria.masking import gather_tokens, patchify, token_validity
+from sometria.masking import gather_tokens, patchify
 
 POOLINGS = ("window", "dof")
 
@@ -184,22 +184,18 @@ class MotionTransformerEncoder(nn.Module):
     def embed_tokens(
         self,
         features: t.Tensor,
-        valid: t.Tensor | None = None,
         index: t.Tensor | None = None,
     ) -> t.Tensor:
         """``(B, T, D, C)`` -> ``(B, L, d_model)``, one contextualized vector per token.
 
         ``index`` selects a subset of the flat grid before the blocks run -- a masked
         objective passes its context indices here, so the encoder never attends to a
-        token it is supposed to be predicting. ``valid`` is the frame mask; invalid
-        tokens are hidden from attention. Callers that exclude short samples up front
-        (``MotionViewSpec.min_frames``) pass neither.
+        token it is supposed to be predicting.
         """
 
         return self.embed_values(
             self.token_values(features),
             self.spec.time_patches(features.shape[1]),
-            valid=valid,
             index=index,
         )
 
@@ -208,7 +204,6 @@ class MotionTransformerEncoder(nn.Module):
         values: t.Tensor,
         num_time_patches: int,
         *,
-        valid: t.Tensor | None = None,
         index: t.Tensor | None = None,
     ) -> t.Tensor:
         """:meth:`embed_tokens` for a caller that has already patchified.
@@ -220,50 +215,29 @@ class MotionTransformerEncoder(nn.Module):
         x = self.projection(values)
         if index is None:
             x = x + self.position.get_flat(num_time_patches)
-            padding = None if valid is None else ~self._token_valid(valid, values.shape[1])
         else:
             x = gather_tokens(x, index)
             x = x + self.position.gather(index, num_time_patches)
-            # A masker forces invalid tokens into its targets, so a context set is
-            # already free of padding.
-            padding = None
 
-        return self.blocks(x, src_key_padding_mask=padding)
+        # No src_key_padding_mask: every token is real, and handing nn.TransformerEncoder
+        # an all-False mask costs ~35% of a full-grid encode by disabling its fused path.
+        return self.blocks(x)
 
-    def embed(
-        self,
-        features: t.Tensor,
-        *,
-        pool: str = "window",
-        valid: t.Tensor | None = None,
-    ) -> t.Tensor:
+    def embed(self, features: t.Tensor, *, pool: str = "window") -> t.Tensor:
         """Pooled convenience over :meth:`embed_tokens`.
 
         ``pool="window"`` means over the whole grid to ``d_model``; ``pool="dof"`` means
-        over time only, so the per-joint axis survives into ``num_dofs * d_model``. Both
-        average over valid tokens only -- a padded token is not a quiet one.
+        over time only, so the per-joint axis survives into ``num_dofs * d_model``.
         """
 
         if pool not in POOLINGS:
             raise ValueError(f"pool must be one of {POOLINGS}, got {pool!r}")
 
-        tokens = self.embed_tokens(features, valid=valid)
+        tokens = self.embed_tokens(features)
         batch, length, width = tokens.shape
-        patches = length // self.spec.num_dofs
-
-        weight = (
-            t.ones(batch, length, 1, device=tokens.device, dtype=tokens.dtype)
-            if valid is None
-            else self._token_valid(valid, length).unsqueeze(-1).to(tokens.dtype)
-        )
-        tokens = tokens * weight
 
         if pool == "window":
-            return tokens.sum(dim=1) / weight.sum(dim=1).clamp(min=1.0)
+            return tokens.mean(dim=1)
 
-        grid = tokens.reshape(batch, patches, self.spec.num_dofs, width)
-        counts = weight.reshape(batch, patches, self.spec.num_dofs, 1).sum(dim=1).clamp(min=1.0)
-        return (grid.sum(dim=1) / counts).flatten(start_dim=1)
-
-    def _token_valid(self, valid: t.Tensor, length: int) -> t.Tensor:
-        return token_validity(valid, self.spec.patch_size, length).to(self.position.time_encoding.device)
+        grid = tokens.reshape(batch, length // self.spec.num_dofs, self.spec.num_dofs, width)
+        return grid.mean(dim=1).flatten(start_dim=1)

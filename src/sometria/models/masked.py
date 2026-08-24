@@ -113,13 +113,12 @@ class MaskedMotionAutoencoder(PretextObjective):
     def forward(
         self,
         features: t.Tensor,
-        valid: t.Tensor | None = None,
         generator: t.Generator | None = None,
     ) -> tuple[t.Tensor, t.Tensor, MaskedWindow]:
         """Return ``(prediction, target, window)``, the first two over target tokens only."""
 
         spec = self.backbone.spec
-        window = mask_window(features, spec, self.mask, valid=valid, generator=generator)
+        window = mask_window(features, spec, self.mask, generator=generator)
 
         # The encoder always reads the input; only what the decoder is asked for changes.
         # extract_motion runs on the window, not on the patches, so the difference at a
@@ -147,19 +146,14 @@ class MaskedMotionAutoencoder(PretextObjective):
         target = target_source[..., self.loss_channel_index].flatten(start_dim=-2)
         return window.mask.targets_of(prediction), window.mask.targets_of(target), window
 
-    def reconstruction_loss(
-        self,
-        prediction: t.Tensor,
-        target: t.Tensor,
-        target_valid: t.Tensor,
-    ) -> t.Tensor:
+    def reconstruction_loss(self, prediction: t.Tensor, target: t.Tensor) -> t.Tensor:
         """``prediction`` and ``target`` are both ``(B, N, patch_size * len(loss_channels))``."""
 
         if self.norm_targets:
             target = standardize_tokens(target)
-        return masked_token_mse(prediction, target, target_valid)
+        return masked_token_mse(prediction, target)
 
     def step(self, batch: dict) -> tuple[t.Tensor, dict[str, t.Tensor | float]]:
-        prediction, target, window = self(batch["features"], batch.get("valid"))
-        loss = self.reconstruction_loss(prediction, target, window.target_valid)
+        prediction, target, window = self(batch["features"])
+        loss = self.reconstruction_loss(prediction, target)
         return loss, {"context_tokens": float(window.mask.context.shape[1])}

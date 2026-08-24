@@ -48,7 +48,6 @@ class MotionPredictor(nn.Module):
         context_idx: t.Tensor,
         targets_idx: t.Tensor,
         num_time_patches: int,
-        target_valid: t.Tensor | None = None,
     ) -> t.Tensor:
         batch, target_count = targets_idx.shape
 
@@ -56,17 +55,7 @@ class MotionPredictor(nn.Module):
         targets = self.mask_token.expand(batch, target_count, -1)
         targets = targets + self.position.gather(targets_idx, num_time_patches)
 
-        padding = None
-        if target_valid is not None:
-            padding = t.cat(
-                [
-                    t.zeros(context_idx.shape, dtype=t.bool, device=context.device),
-                    ~target_valid.to(context.device),
-                ],
-                dim=1,
-            )
-
-        predicted = self.blocks(t.cat([context, targets], dim=1), src_key_padding_mask=padding)
+        predicted = self.blocks(t.cat([context, targets], dim=1))
         return predicted[:, -target_count:]
 
 
@@ -125,17 +114,11 @@ class MotionJEPA(PretextObjective):
     def forward(
         self,
         features: t.Tensor,
-        valid: t.Tensor | None = None,
         generator: t.Generator | None = None,
     ) -> tuple[t.Tensor, t.Tensor, MaskedWindow]:
         """Return ``(prediction, teacher_target, window)`` over target tokens."""
 
-        window = mask_window(
-            features, self.student.spec, self.mask, valid=valid, generator=generator
-        )
-        # ponytail: mask_ratio=0.25 gives 322 target slots on a 1290-token window; a
-        # padded window with more invalid tokens than that would spill padding into
-        # context, but current pretraining excludes short windows and passes valid=None.
+        window = mask_window(features, self.student.spec, self.mask, generator=generator)
 
         context = self.student.embed_values(
             window.values, window.num_time_patches, index=window.mask.context
@@ -145,20 +128,17 @@ class MotionJEPA(PretextObjective):
             context_idx=window.mask.context,
             targets_idx=window.mask.targets,
             num_time_patches=window.num_time_patches,
-            target_valid=window.target_valid,
         )
 
         with t.no_grad():
-            teacher_tokens = self.teacher.embed_values(
-                window.values, window.num_time_patches, valid=valid
-            )
+            teacher_tokens = self.teacher.embed_values(window.values, window.num_time_patches)
             target = window.mask.targets_of(teacher_tokens)
 
         return prediction, target, window
 
     def step(self, batch: dict) -> tuple[t.Tensor, dict[str, t.Tensor | float]]:
-        prediction, target, window = self(batch["features"], batch.get("valid"))
-        loss = masked_token_mse(prediction, target, window.target_valid)
+        prediction, target, window = self(batch["features"])
+        loss = masked_token_mse(prediction, target)
         return loss, {
             "context_tokens": float(window.mask.context.shape[1]),
             # Spread of the teacher's target vectors across the batch. Measured on the
