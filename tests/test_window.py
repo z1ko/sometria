@@ -124,6 +124,19 @@ def test_masked_token_mse_survives_a_window_with_no_valid_target():
     loss.backward()                           # a zeroed loss still has to be differentiable
 
 
+def test_masked_token_mse_survives_an_empty_target_set():
+    """round(L * (1 - mask_ratio)) == L is a legal MaskSpec, and leaves nothing to score."""
+
+    w = _window(mask=MaskSpec(mask_ratio=0.005, tau=0.0, score_channels=()))
+    assert w.mask.targets.shape[1] == 0
+
+    prediction = t.zeros(2, 0, 3, requires_grad=True)
+    loss = masked_token_mse(prediction, t.zeros(2, 0, 3), w.target_valid)
+
+    assert loss.isfinite() and loss.item() == 0.0
+    loss.backward()
+
+
 def test_standardize_tokens_normalizes_each_token_over_its_own_values():
     """MAMP's norm_skes_loss: the loss asks for the shape of a patch, not its magnitude."""
 

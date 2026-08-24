@@ -11,9 +11,7 @@ the EMA.
 """
 
 from copy import deepcopy
-from dataclasses import asdict
 
-import lightning as L
 import torch as t
 import torch.nn as nn
 
@@ -21,18 +19,12 @@ from sometria.architecture.encoder import (
     EncoderSpec,
     MotionTransformerEncoder,
     as_backbone,
-    backbone_hparam,
     transformer_stack,
 )
 from sometria.architecture.pos_embed import PositionalEncoding
-from sometria.architecture.scheduler import lr_schedule
-from sometria.masking import MaskSpec, as_mask_spec
+from sometria.masking import MaskSpec
+from sometria.models.objective import PretextObjective
 from sometria.models.window import MaskedWindow, mask_window, masked_token_mse
-
-# JEPA holds out a quarter of the window where masked reconstruction holds out nine
-# tenths: its target is an embedding the teacher computed from the whole grid, not a
-# patch the decoder has to invent.
-DEFAULT_MASK = MaskSpec(mask_ratio=0.25, tau=0.80, score_channels=(2,))
 
 
 class MotionPredictor(nn.Module):
@@ -78,8 +70,17 @@ class MotionPredictor(nn.Module):
         return predicted[:, -target_count:]
 
 
-class MotionJEPA(L.LightningModule):
+class MotionJEPA(PretextObjective):
     """Predict an EMA teacher's target-token embeddings from student context tokens."""
+
+    # JEPA holds out a quarter of the window where masked reconstruction holds out nine
+    # tenths: its target is an embedding the teacher computed from the whole grid, not a
+    # patch the decoder has to invent.
+    DEFAULT_MASK = MaskSpec(mask_ratio=0.25, tau=0.80, score_channels=(2,))
+
+    # The collapse guard belongs on the bar: a JEPA whose embeddings stop varying drives
+    # its own loss to zero, so val/loss alone cannot say whether training is working.
+    PROG_BAR = ("embed_std",)
 
     def __init__(
         self,
@@ -94,25 +95,23 @@ class MotionJEPA(L.LightningModule):
         weight_decay: float = 0.05,
         warmup_frac: float = 0.05,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            mask,
+            lr=lr,
+            min_lr_frac=min_lr_frac,
+            weight_decay=weight_decay,
+            warmup_frac=warmup_frac,
+        )
 
         backbone = as_backbone(backbone)
-        mask = as_mask_spec(mask, DEFAULT_MASK)
         if not 0.0 <= ema_start <= ema_end <= 1.0:
             raise ValueError("EMA values must satisfy 0 <= ema_start <= ema_end <= 1.")
 
-        self.save_hyperparameters(
-            {
-                "backbone": backbone_hparam(backbone),
-                "mask": asdict(mask),
-                "predictor_depth": predictor_depth,
-                "ema_start": ema_start,
-                "ema_end": ema_end,
-                "lr": lr,
-                "min_lr_frac": min_lr_frac,
-                "weight_decay": weight_decay,
-                "warmup_frac": warmup_frac,
-            }
+        self.save_objective_hyperparameters(
+            backbone,
+            predictor_depth=predictor_depth,
+            ema_start=ema_start,
+            ema_end=ema_end,
         )
 
         self.student = backbone
@@ -120,13 +119,8 @@ class MotionJEPA(L.LightningModule):
         self.teacher.requires_grad_(False)
         self.predictor = MotionPredictor(backbone.spec, depth=predictor_depth)
 
-        self.mask = mask
         self.ema_start = ema_start
         self.ema_end = ema_end
-        self.lr = lr
-        self.min_lr_frac = min_lr_frac
-        self.weight_decay = weight_decay
-        self.warmup_frac = warmup_frac
 
     def forward(
         self,
@@ -160,29 +154,24 @@ class MotionJEPA(L.LightningModule):
             )
             target = window.mask.targets_of(teacher_tokens)
 
-        self._last_teacher_embed_std = teacher_tokens.std(dim=0, unbiased=False).mean()
-
         return prediction, target, window
 
-    def _step(self, batch: dict, stage: str) -> t.Tensor:
+    def step(self, batch: dict) -> tuple[t.Tensor, dict[str, t.Tensor | float]]:
         prediction, target, window = self(batch["features"], batch.get("valid"))
         loss = masked_token_mse(prediction, target, window.target_valid)
-        batch_size = batch["features"].shape[0]
-        self.log(f"{stage}/loss", loss, prog_bar=True, batch_size=batch_size)
-        self.log(f"{stage}/context_tokens", float(window.mask.context.shape[1]), batch_size=batch_size)
-        self.log(
-            f"{stage}/embed_std",
-            self._last_teacher_embed_std,
-            prog_bar=True,
-            batch_size=batch_size,
-        )
-        return loss
+        return loss, {
+            "context_tokens": float(window.mask.context.shape[1]),
+            # Spread of the teacher's target vectors across the batch. Measured on the
+            # target tokens rather than the whole grid because those are the ones the
+            # loss scores: if these collapse to a constant, the loss reaches zero while
+            # the backbone has learned nothing.
+            "embed_std": target.std(dim=0, unbiased=False).mean(),
+        }
 
-    def training_step(self, batch: dict, batch_idx: int) -> t.Tensor:
-        return self._step(batch, "train")
+    def trainable_parameters(self):
+        """The teacher is an EMA copy, not an optimized module."""
 
-    def validation_step(self, batch: dict, batch_idx: int) -> t.Tensor:
-        return self._step(batch, "val")
+        return list(self.student.parameters()) + list(self.predictor.parameters())
 
     def train(self, mode: bool = True) -> "MotionJEPA":
         """Keep the teacher in eval mode; Lightning will not do it for you.
@@ -215,24 +204,3 @@ class MotionJEPA(L.LightningModule):
         ema = self.ema_start + (self.ema_end - self.ema_start) * progress
         self.update_teacher(ema)
         self.log("train/ema", ema, batch_size=batch["features"].shape[0])
-
-    def configure_optimizers(self): # type: ignore
-        optimizer = t.optim.AdamW(
-            list(self.student.parameters()) + list(self.predictor.parameters()),
-            lr=self.lr,
-            betas=(0.9, 0.95),
-            weight_decay=self.weight_decay,
-        )
-        total_steps = int(self.trainer.estimated_stepping_batches)
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": lr_schedule(
-                    optimizer,
-                    warmup_steps=max(1, int(self.warmup_frac * total_steps)),
-                    total_steps=total_steps,
-                    min_factor=self.min_lr_frac,
-                ),
-                "interval": "step",
-            },
-        }

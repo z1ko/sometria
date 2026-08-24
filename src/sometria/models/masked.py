@@ -23,9 +23,6 @@ objective explained 7.7% of its target's variance in 10 epochs while the pose ob
 explained 98.8%.
 """
 
-from dataclasses import asdict
-
-import lightning as L
 import torch as t
 import torch.nn as nn
 
@@ -33,12 +30,11 @@ from sometria.architecture.encoder import (
     EncoderSpec,
     MotionTransformerEncoder,
     as_backbone,
-    backbone_hparam,
     transformer_stack,
 )
 from sometria.architecture.pos_embed import PositionalEncoding
-from sometria.architecture.scheduler import lr_schedule
-from sometria.masking import MaskSpec, as_mask_spec, extract_motion, patchify
+from sometria.masking import MaskSpec, extract_motion, patchify
+from sometria.models.objective import PretextObjective
 from sometria.models.window import (
     MaskedWindow,
     mask_window,
@@ -48,13 +44,13 @@ from sometria.models.window import (
 
 TARGETS = ("values", "motion")
 
-# The reference's MAMP masking. MAE is the same at tau <= 0; both baselines set every
-# knob in their config, so this default is what an unconfigured model gets, not a policy.
-DEFAULT_MASK = MaskSpec(mask_ratio=0.90, tau=0.80, score_channels=(2,))
 
-
-class MaskedMotionAutoencoder(L.LightningModule):
+class MaskedMotionAutoencoder(PretextObjective):
     """Predict the values of masked motion tokens from the ones left visible."""
+
+    # The reference's MAMP masking. MAE is the same at tau <= 0; both baselines set every
+    # knob in their config, so this is what an unconfigured model gets, not a policy.
+    DEFAULT_MASK = MaskSpec(mask_ratio=0.90, tau=0.80, score_channels=(2,))
 
     def __init__(
         self,
@@ -72,43 +68,34 @@ class MaskedMotionAutoencoder(L.LightningModule):
         weight_decay: float = 0.05,
         warmup_frac: float = 0.05,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            mask,
+            lr=lr,
+            min_lr_frac=min_lr_frac,
+            weight_decay=weight_decay,
+            warmup_frac=warmup_frac,
+        )
 
         backbone = as_backbone(backbone)
-        mask = as_mask_spec(mask, DEFAULT_MASK)
         if target not in TARGETS:
             raise ValueError(f"target must be one of {TARGETS}, got {target!r}")
         if not loss_channels:
             raise ValueError("the loss needs at least one channel to score.")
 
-        # The specs, never the modules: hparams have to survive a checkpoint round trip,
-        # and this is what lets load_from_checkpoint(path) rebuild them unaided.
-        self.save_hyperparameters(
-            {
-                "backbone": backbone_hparam(backbone),
-                "mask": asdict(mask),
-                "decoder_depth": decoder_depth,
-                "target": target,
-                "motion_stride": motion_stride,
-                "loss_channels": tuple(loss_channels),
-                "norm_targets": norm_targets,
-                "lr": lr,
-                "min_lr_frac": min_lr_frac,
-                "weight_decay": weight_decay,
-                "warmup_frac": warmup_frac,
-            }
+        self.save_objective_hyperparameters(
+            backbone,
+            decoder_depth=decoder_depth,
+            target=target,
+            motion_stride=motion_stride,
+            loss_channels=tuple(loss_channels),
+            norm_targets=norm_targets,
         )
 
         self.backbone = backbone
-        self.mask = mask
         spec = backbone.spec
         self.target = target
         self.motion_stride = motion_stride
         self.norm_targets = norm_targets
-        self.lr = lr
-        self.min_lr_frac = min_lr_frac
-        self.weight_decay = weight_decay
-        self.warmup_frac = warmup_frac
 
         time_patches, num_dofs = spec.grid_shape
         self.mask_token = nn.Parameter(t.zeros(1, 1, spec.d_model))
@@ -172,36 +159,7 @@ class MaskedMotionAutoencoder(L.LightningModule):
             target = standardize_tokens(target)
         return masked_token_mse(prediction, target, target_valid)
 
-    def _step(self, batch: dict, stage: str) -> t.Tensor:
+    def step(self, batch: dict) -> tuple[t.Tensor, dict[str, t.Tensor | float]]:
         prediction, target, window = self(batch["features"], batch.get("valid"))
         loss = self.reconstruction_loss(prediction, target, window.target_valid)
-        batch_size = batch["features"].shape[0]
-        self.log(f"{stage}/loss", loss, prog_bar=True, batch_size=batch_size)
-        self.log(f"{stage}/context_tokens", float(window.mask.context.shape[1]), batch_size=batch_size)
-        return loss
-
-    def training_step(self, batch: dict, batch_idx: int) -> t.Tensor:
-        return self._step(batch, "train")
-
-    def validation_step(self, batch: dict, batch_idx: int) -> t.Tensor:
-        return self._step(batch, "val")
-
-    def configure_optimizers(self): # type: ignore
-        # betas and weight decay follow the reference's AdamW; its cosine decays to
-        # min_lr = lr / 2 rather than to zero, which min_lr_frac carries.
-        optimizer = t.optim.AdamW(
-            self.parameters(), lr=self.lr, betas=(0.9, 0.95), weight_decay=self.weight_decay
-        )
-        total_steps = int(self.trainer.estimated_stepping_batches)
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": lr_schedule(
-                    optimizer,
-                    warmup_steps=max(1, int(self.warmup_frac * total_steps)),
-                    total_steps=total_steps,
-                    min_factor=self.min_lr_frac,
-                ),
-                "interval": "step",
-            },
-        }
+        return loss, {"context_tokens": float(window.mask.context.shape[1])}

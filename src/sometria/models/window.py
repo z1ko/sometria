@@ -117,8 +117,11 @@ def masked_token_mse(
 
     if not target_valid.any():
         # Multiplied rather than replaced by a constant: a window with no real target
-        # still has to hand back something the graph can be walked back through.
-        return (prediction - target).square().mean() * 0.0
+        # still has to hand back something the graph can be walked back through. Summed
+        # rather than meaned because the target set can be empty outright -- a mask_ratio
+        # small enough to round every token into the context is a legal MaskSpec -- and
+        # the mean of an empty tensor is NaN.
+        return prediction.sum() * 0.0
 
     per_token = (prediction - target).square().mean(dim=-1)
     return (per_token * target_valid).sum() / target_valid.sum()

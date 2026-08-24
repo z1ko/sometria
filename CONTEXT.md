@@ -179,8 +179,13 @@ _Avoid_: decoder, head, projection MLP
 **Pretext objective**:
 Self-supervised training task over a backbone: what hidden, what predicted, what
 loss is. One `LightningModule` per objective under `models/`, over a shared
-**Masked window**: masked reconstruction and JEPA today. MAE and MAMP *not* separate
-objectives: one
+**Masked window**: masked reconstruction and JEPA today. Both subclass
+`PretextObjective`, which owns optimizer, schedule and steps -- a subclass says only
+`step(batch)`, returning loss plus whatever else it wants logged, and
+`trainable_parameters` if it holds something frozen. A **Protocol** deliberately
+stays outside: its optimizer runs two parameter groups at different rates on AdamW's own
+betas and decay, three knobs this base would carry for one call site. MAE and MAMP *not*
+separate objectives: one
 `MaskedMotionAutoencoder` at two configurations, differing in `tau` (uniform vs motion-aware
 masking) and `target` (reconstruct input vs predict its temporal difference). Both follow
 reference in taking motion target by differencing *the input the encoder sees*
