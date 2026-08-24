@@ -10,13 +10,20 @@ from sometria.catalog import MotionViewSpec, build_motion_view
 from sometria.representation import Representation
 
 
-class RandomWindowCollate:
-    """Collate variable-length motions into fixed-size training windows."""
+class WindowCollate:
+    """Collate variable-length motions into fixed-size windows.
 
-    def __init__(self, window_frames: int) -> None:
+    ``random_offset`` is what separates training from evaluation: a random crop each
+    epoch is augmentation while training, but while validating it moves the metric for
+    reasons unrelated to the model, and ``ModelCheckpoint(monitor="val/loss")`` then
+    selects on crop luck. Evaluation takes the centre of the motion, every epoch.
+    """
+
+    def __init__(self, window_frames: int, random_offset: bool = True) -> None:
         if window_frames <= 0:
             raise ValueError("window_frames must be positive.")
         self.window_frames = window_frames
+        self.random_offset = random_offset
 
     def __call__(self, batch: list[dict]) -> dict:
         windows = []
@@ -32,7 +39,11 @@ class RandomWindowCollate:
 
             if n_frames >= self.window_frames:
                 max_start = n_frames - self.window_frames
-                start = int(t.randint(max_start + 1, ()).item())
+                start = (
+                    int(t.randint(max_start + 1, ()).item())
+                    if self.random_offset
+                    else max_start // 2
+                )
                 window = features[start:start + self.window_frames]
                 valid_window = t.ones(self.window_frames, dtype=t.bool)
             else:
@@ -134,16 +145,22 @@ class MotionDataModule(L.LightningDataModule):
             raise ValueError("config.dataloader.human is required.")
         self.representation = Representation.from_config(human)
 
+        # Short samples are dropped, not zero-padded: padding scores as motionless, so
+        # motion-aware masking keeps it and spends the context budget on frames that are
+        # not there. The spec is where that decision is enforced, and it has to reach both
+        # splits or the training path quietly keeps the padding branch alive.
         self.train_spec = MotionViewSpec(
             split_set=config.dataloader.train.split_set,
             split=config.dataloader.train.split,
             source_datasets=tuple(config.dataloader.train.get("source_datasets", [])),
+            min_frames=self.window_frames,
         )
 
         self.val_spec = MotionViewSpec(
             split_set=config.dataloader.val.split_set,
             split=config.dataloader.val.split,
             source_datasets=tuple(config.dataloader.val.get("source_datasets", [])),
+            min_frames=self.window_frames,
         )
 
     def setup(self, stage: str | None = None) -> None:
@@ -165,7 +182,14 @@ class MotionDataModule(L.LightningDataModule):
             )
         
 
-    def _loader(self, dataset: MotionDataset, shuffle: bool, drop_last: bool, sampler=None):
+    def _loader(
+        self,
+        dataset: MotionDataset,
+        shuffle: bool,
+        drop_last: bool,
+        sampler=None,
+        random_offset: bool = True,
+    ):
         return t.utils.data.DataLoader(
             dataset=dataset,
             batch_size=self.batch_size,
@@ -175,7 +199,7 @@ class MotionDataModule(L.LightningDataModule):
             num_workers=self.num_workers,
             persistent_workers=self.num_workers > 0,
             prefetch_factor=2 if self.num_workers > 0 else None,
-            collate_fn=RandomWindowCollate(self.window_frames),
+            collate_fn=WindowCollate(self.window_frames, random_offset=random_offset),
         )
 
     def _duration_weighted_sampler(self, dataset: MotionDataset):
@@ -201,4 +225,6 @@ class MotionDataModule(L.LightningDataModule):
         return self._loader(self.train_dataset, drop_last=True, shuffle=True, sampler=sampler)
 
     def val_dataloader(self):
-        return self._loader(self.val_dataset, drop_last=False, shuffle=False)
+        return self._loader(
+            self.val_dataset, drop_last=False, shuffle=False, random_offset=False
+        )

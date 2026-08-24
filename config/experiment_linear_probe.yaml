@@ -1,0 +1,50 @@
+# Linear probe: the backbone frozen and in eval, pooled over the whole grid, one Linear.
+# Point `checkpoint` at a pretraining run; the backbone spec travels in its hparams, so
+# the `encoder` block below only has to match for a run trained from scratch.
+
+dataloader:
+  root: data/processed
+  human: config/human.yaml
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_train_clean.pt
+  batch_size: 32
+  num_workers: 4
+  window_frames: 240
+  label_set: babel_action_60
+  label_min_coverage: 0.15
+
+  train:
+    split_set: babel_official
+    split: train
+    source_datasets: ["AMASS"]
+
+  val:
+    split_set: babel_official
+    split: val
+    source_datasets: ["AMASS"]
+
+encoder:
+  num_dofs: 43
+  num_features: 5
+  patch_size: 8
+  window_frames: 240
+  d_model: 256
+  depth: 4
+  num_heads: 4
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+model:
+  name: classifier
+  checkpoint: null       # e.g. runs/mamp/lightning_logs/version_0/checkpoints/last.ckpt
+  pool: window           # -> d_model
+  head: linear
+  freeze_backbone: true
+  lr_head: 0.001
+
+training:
+  seed: 13
+  epochs: 20
+  monitor: val/map
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  overfit_batches: 0

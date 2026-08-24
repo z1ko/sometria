@@ -1,3 +1,3 @@
-from sometria.models.autoencoder import MotionConvAutoencoder, MotionMaskedAutoencoder
+from sometria.models.masked import MaskedMotionAutoencoder
 
-__all__ = ["MotionConvAutoencoder", "MotionMaskedAutoencoder"]
+__all__ = ["MaskedMotionAutoencoder"]

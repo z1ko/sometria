@@ -57,6 +57,29 @@ def patchify(features: t.Tensor, patch_size: int) -> t.Tensor:
     return patches.reshape(B, -1, patch_size, C)
 
 
+def token_validity(valid: t.Tensor, patch_size: int, length: int) -> t.Tensor:
+    """``(B, T)`` frame mask -> ``(B, length)`` token mask.
+
+    A token is valid only if *every* frame it covers is real: a patch that is half
+    padding is not half usable. The same reduction is needed by the masker (to keep
+    padding out of the context set), by the encoder's pooling (so a mean is taken over
+    real tokens only) and by the reconstruction loss, so it lives here rather than being
+    written out three times.
+
+    ``length`` is the flat token count ``TP * D``; the per-time-patch mask is repeated
+    across the DOF axis, which is what ``t * D + d`` ordering asks for.
+    """
+
+    if valid.shape[1] % patch_size != 0:
+        raise ValueError(
+            f"valid covers {valid.shape[1]} frames, not divisible by patch_size {patch_size}"
+        )
+    usable = valid.reshape(valid.shape[0], -1, patch_size).all(dim=-1)          # (B, TP)
+    if length % usable.shape[1] != 0:
+        raise ValueError(f"{length} tokens is not a whole number of {usable.shape[1]} time patches")
+    return usable.repeat_interleave(length // usable.shape[1], dim=1)
+
+
 def motion_aware_mask(
     patches: t.Tensor,
     *,
@@ -112,12 +135,7 @@ def motion_aware_mask(
         # A token is usable only if every frame it covers is real. +inf sorts it last,
         # which puts it in targets; masking the noise afterwards keeps +inf out of the
         # softmax, where it would produce NaN.
-        if valid.shape[1] % patch_size != 0:
-            raise ValueError(
-                f"valid covers {valid.shape[1]} frames, not divisible by patch_size {patch_size}"
-            )
-        usable = valid.reshape(B, -1, patch_size).all(dim=-1)                  # (B, TP)
-        usable = usable.repeat_interleave(L // usable.shape[1], dim=1)
+        usable = token_validity(valid, patch_size, L).to(device)
         noise = noise.masked_fill(~usable, float("inf"))
 
     order = noise.argsort(dim=-1)          # ascending: quiet and real first, loud last

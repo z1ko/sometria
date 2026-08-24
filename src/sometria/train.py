@@ -5,25 +5,46 @@ import argparse
 from omegaconf import OmegaConf, DictConfig
 
 import lightning as L
-import torch as t
 
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
+from sometria.architecture.encoder import EncoderSpec
 from sometria.dataset import MotionDataModule
-from sometria.models import MotionConvAutoencoder, MotionMaskedAutoencoder
+from sometria.downstream.classifier import MotionWindowClassifier
+from sometria.downstream.dataset import LabelledMotionDataModule
+from sometria.downstream.labels import load_label_vocabulary_index
+from sometria.models.masked import MaskedMotionAutoencoder
 
-EPOCHS = 200
 
+def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]:
+    """Turn one config into the objective and the loader it needs.
 
-def build_model(config: DictConfig) -> L.LightningModule:
+    ``config.encoder`` is the backbone spec, kept separate from ``config.model`` because
+    the backbone is the thing that transfers: pretraining and downstream name the same
+    architecture, and downstream then loads weights into it.
+    """
+
+    spec = EncoderSpec(**OmegaConf.to_container(config.encoder, resolve=True))
     model_config = OmegaConf.to_container(config.model, resolve=True)
-    name = model_config.pop("name", "conv_autoencoder")
+    name = model_config.pop("name")
 
-    if name == "conv_autoencoder":
-        return MotionConvAutoencoder(**model_config)
-    if name == "masked_autoencoder":
-        return MotionMaskedAutoencoder(**model_config)
+    if name == "masked":
+        return MaskedMotionAutoencoder(spec, **model_config), MotionDataModule(config)
+
+    if name == "classifier":
+        checkpoint = model_config.pop("checkpoint", None)
+        # How many labels there are is a property of the vocabulary, not of the run --
+        # keeping it in the config too is just a second place for it to be wrong.
+        _, model_config["num_labels"] = load_label_vocabulary_index(
+            config.dataloader.root, config.dataloader.label_set
+        )
+        model = (
+            MotionWindowClassifier(spec, **model_config)
+            if checkpoint is None
+            else MotionWindowClassifier.from_pretrained(checkpoint, **model_config)
+        )
+        return model, LabelledMotionDataModule(config)
 
     raise ValueError(f"Unknown model: {name}")
 
@@ -32,8 +53,8 @@ def train(config: DictConfig, output: Path):
     output = Path(output)
 
     L.seed_everything(config.training.seed, workers=True)
-    datamodule = MotionDataModule(config)
-    model = build_model(config)
+    model, datamodule = build(config)
+    monitor = config.training.get("monitor", "val/loss")
 
     trainer = L.Trainer(
         accelerator="auto",
@@ -46,8 +67,8 @@ def train(config: DictConfig, output: Path):
         callbacks=[
             LearningRateMonitor(logging_interval="step"),
             ModelCheckpoint(
-                monitor="val/loss",
-                mode="min",
+                monitor=monitor,
+                mode="max" if monitor.endswith("map") else "min",
                 save_top_k=1,
                 save_last=True,
             ),
@@ -59,12 +80,11 @@ def train(config: DictConfig, output: Path):
     trainer.fit(model, datamodule=datamodule)
     return trainer, model
 
-    
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train a Sometria smoke-test model.")
-    parser.add_argument("--config", type=Path, default=Path("config/experiment.yaml"))
-    parser.add_argument("--output", type=Path, default=Path("runs/conv_autoencoder_smoke"))
+    parser = argparse.ArgumentParser(description="Train a Sometria model.")
+    parser.add_argument("--config", type=Path, default=Path("config/experiment_mamp.yaml"))
+    parser.add_argument("--output", type=Path, default=Path("runs/mamp"))
     args = parser.parse_args()
 
     config = OmegaConf.load(args.config)

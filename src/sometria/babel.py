@@ -229,35 +229,54 @@ def import_babel_action_vocabulary(
     output_root: str | Path,
     babel_root: str | Path,
     label_source: str = "BABEL",
-    label_set: str = "babel_action_150",
+    sizes: tuple[int, ...] = (60, 120, 150),
     filename: str = "action_label_2_idx.json",
 ) -> pl.DataFrame:
-    """Import BABEL's action-category vocabulary for downstream evaluation.
+    """Import BABEL's action-category vocabulary, and its prefixes, for downstream evaluation.
 
     ``action_label_2_idx.json`` fixes the 150 action categories the BABEL benchmarks score and
     the integer each maps to, ordered by frequency. It is a much smaller set than the labels
     actually present: the corpus carries a long tail of ``act_cat`` values with no index here,
-    which downstream tasks are expected to drop rather than treat as extra classes.
+    which downstream tasks treat as out of scope rather than as extra classes.
+
+    The 60- and 120-way benchmarks are index *prefixes* of that one list, not separate files.
+    They are materialized as their own ``label_set`` rows -- ``babel_action_60`` and
+    ``babel_action_120`` -- so a benchmark is named rather than carried around as a cutoff.
+    The three sets cover 70.3%, 75.3% and 76.0% of ``act_cat`` frame-annotation rows
+    (72.7%, 78.8% and 79.7% once sequence-level rows are counted too, as the downstream
+    loader does).
     """
 
     mapping = json.loads((Path(babel_root) / filename).read_text())
 
-    vocabulary = pl.DataFrame(
+    indices = sorted(int(i) for i in mapping.values())
+    if indices != list(range(len(mapping))):
+        raise ValueError(
+            f"{filename} indices are not a contiguous 0..{len(mapping) - 1} range; "
+            "downstream code assumes they can index a classifier head directly."
+        )
+
+    full = pl.DataFrame(
         {
             "label_source": [label_source] * len(mapping),
-            "label_set": [label_set] * len(mapping),
             "ontology": ["act_cat"] * len(mapping),
             "label": list(mapping.keys()),
             "label_index": [int(i) for i in mapping.values()],
         }
     )
 
-    indices = vocabulary["label_index"]
-    if indices.n_unique() != len(vocabulary) or sorted(indices) != list(range(len(vocabulary))):
-        raise ValueError(
-            f"{filename} indices are not a contiguous 0..{len(vocabulary) - 1} range; "
-            "downstream code assumes they can index a classifier head directly."
-        )
+    unknown = [size for size in sizes if size > len(mapping)]
+    if unknown:
+        raise ValueError(f"{filename} holds {len(mapping)} labels, cannot cut it at {unknown}")
+
+    vocabulary = pl.concat(
+        [
+            full.filter(pl.col("label_index") < size).with_columns(
+                pl.lit(f"babel_action_{size}").alias("label_set")
+            )
+            for size in sizes
+        ]
+    ).select("label_source", "label_set", "ontology", "label", "label_index")
 
     return upsert_table(
         output_root,

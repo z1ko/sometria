@@ -1,3 +1,5 @@
+# MAMP baseline: motion-aware masking, velocity as the target.
+# Its only differences from experiment_mae.yaml are `tau` and `loss_channels`.
 
 dataloader:
   root: data/processed
@@ -17,23 +19,23 @@ dataloader:
     split: val
     source_datasets: ["AMASS"]
 
-model:
-  name: masked_autoencoder
+encoder:
   num_dofs: 43
   num_features: 5
-  patch_size: 8
-  max_time_patches: 64
+  patch_size: 8          # 133 ms at 60 Hz; 240 frames -> 30 x 43 = 1290 tokens
+  window_frames: 240
   d_model: 256
-  encoder_layers: 4
-  decoder_layers: 2
+  depth: 4
   num_heads: 4
   mlp_ratio: 4.0
   dropout: 0.0
+
+model:
+  name: masked
+  decoder_depth: 2
   mask_ratio: 0.80
-  mask_strategy: mamp
-  tau: 0.25
-  score_channels: [2]
-  loss_channels: [2, 3, 4]
+  tau: 0.25              # > 0: targets drawn in proportion to |vel|
+  loss_channels: [2]     # vel -- the motion target MAMP differences its input to get
   lr: 0.001
 
 training:

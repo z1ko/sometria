@@ -101,8 +101,8 @@ as a second label source exists.
 _Avoid_: split strategy, sampling policy
 
 **Window**:
-The fixed-length crop one batch item carries: `window_frames` frames taken at a random
-offset from one sample by `RandomWindowCollate`. A window is what the model sees; a
+The fixed-length crop one batch item carries: `window_frames` frames taken from one sample
+by `WindowCollate`. A window is what the model sees; a
 patch is how that window is tokenized. Samples shorter than a window are excluded by
 `MotionViewSpec.min_frames`, not padded — 22.8% of `pretrain_v1/train` samples but only
 8.0% of its frames, and a zero-padded window would otherwise fill the context set with
@@ -166,7 +166,10 @@ median segment length of 1.1 s a 4 s window spans several, which is what multi-l
 Deliberately not BABEL's official protocol, which scores one label per chunk and duplicates a
 *k*-label segment into *k* samples, capping such a chunk at 50% Top-1. Comparability to
 published BABEL numbers is given up on purpose, in exchange for a loss with no ceiling and a
-downstream path that reuses the pretraining one. Labels outside the chosen vocabulary
+downstream path that reuses the pretraining one. Both frame-level and sequence-level `act_cat` spans
+count -- a sequence annotation is a span over `0..dur`, and 40% of sequences carry no frame
+annotation at all -- while a sample with no `act_cat` of any kind is *unknown* rather than
+negative, and is excluded. Labels outside the chosen vocabulary
 contribute nothing, so a window covering only out-of-scope segments trains as an all-negative
 example rather than being dropped: dropping would bias evaluation toward the segments that
 happen to carry scoreable labels, and at 19% `transition` that bias is not small.
