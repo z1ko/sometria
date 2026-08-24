@@ -147,6 +147,20 @@ prediction head belongs to it. Exposes `embed_tokens` (full grid), `embed` (pool
 `grid_shape`. Lives under `architecture/`, which holds no Lightning and no training.
 _Avoid_: encoder, feature extractor, trunk
 
+**Student** and **Teacher**:
+JEPA's two backbone instances. Student embeds only context tokens and is optimized by
+gradient descent; teacher embeds the full token grid, is frozen to gradients, and tracks
+student by EMA. Downstream loads teacher by default because probe input is a full
+window, while the student only trained on context subsets.
+_Avoid_: online encoder, target encoder, momentum encoder
+
+**Predictor**:
+JEPA module that receives student context embeddings plus learned target slots and
+outputs vectors in the backbone embedding space at target indices. Same width and
+heads as the backbone, shallower depth only; no bottleneck projections, no decoder
+to patch values.
+_Avoid_: decoder, head, projection MLP
+
 **Pretext objective**:
 A self-supervised training task over a backbone: what is hidden, what is predicted, what the
 loss is. One `LightningModule` per objective under `models/` — masked reconstruction today,

@@ -14,6 +14,7 @@ from sometria.dataset import MotionDataModule
 from sometria.downstream.classifier import MotionWindowClassifier
 from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
+from sometria.models.jepa import MotionJEPA
 from sometria.models.masked import MaskedMotionAutoencoder
 
 
@@ -31,6 +32,9 @@ def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]
 
     if name == "masked":
         return MaskedMotionAutoencoder(spec, **model_config), MotionDataModule(config)
+
+    if name == "jepa":
+        return MotionJEPA(spec, **model_config), MotionDataModule(config)
 
     if name == "classifier":
         checkpoint = model_config.pop("checkpoint", None)

@@ -1,0 +1,51 @@
+# JEPA baseline. Use last.ckpt for downstream probes; collapsed JEPA can drive
+# val/loss toward zero, so the monitored best checkpoint is not a quality signal.
+
+dataloader:
+  root: data/processed
+  human: config/human.yaml
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_train_clean.pt
+  batch_size: 32
+  num_workers: 4
+  window_frames: 240
+
+  train:
+    split_set: pretrain_v1
+    split: train
+    source_datasets: ["AMASS"]
+
+  val:
+    split_set: babel_official
+    split: val
+    source_datasets: ["AMASS"]
+
+encoder:
+  num_dofs: 43
+  num_features: 5
+  patch_size: 8          # 133 ms at 60 Hz; 240 frames -> 30 x 43 = 1290 tokens
+  window_frames: 240
+  d_model: 256
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+model:
+  name: jepa
+  predictor_depth: 4     # depth-only asymmetry; width matches the backbone
+  mask_ratio: 0.25       # target fraction: 322 targets, 968 context tokens
+  tau: 0.80
+  score_channels: [2]    # representation.indices("vel")
+  ema_start: 0.996
+  ema_end: 1.0
+  lr: 0.001
+  min_lr_frac: 0.5
+  weight_decay: 0.05
+  warmup_frac: 0.05
+
+training:
+  seed: 13
+  epochs: 10
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  overfit_batches: 0

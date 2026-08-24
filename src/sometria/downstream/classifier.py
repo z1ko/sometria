@@ -27,7 +27,6 @@ from sometria.architecture.encoder import (
 )
 from sometria.architecture.scheduler import lr_schedule
 from sometria.downstream.metrics import WindowMeanAveragePrecision
-from sometria.models.masked import MaskedMotionAutoencoder
 
 HEADS = ("linear", "mlp")
 
@@ -100,11 +99,39 @@ class MotionWindowClassifier(L.LightningModule):
         self.val_map = WindowMeanAveragePrecision(num_labels=num_labels)
 
     @classmethod
-    def from_pretrained(cls, checkpoint: str, **kwargs) -> "MotionWindowClassifier":
+    def from_pretrained(
+        cls,
+        checkpoint: str,
+        *,
+        encoder: str = "teacher",
+        **kwargs,
+    ) -> "MotionWindowClassifier":
         """Build a classifier around the backbone of a pretrained objective."""
 
-        pretrained = MaskedMotionAutoencoder.load_from_checkpoint(checkpoint, map_location="cpu")
-        return cls(pretrained.backbone, **kwargs)
+        loaded = t.load(checkpoint, map_location="cpu")
+        hparams = loaded["hyper_parameters"]
+        backbone = MotionTransformerEncoder(EncoderSpec(**hparams["backbone"]))
+
+        prefixes = {
+            "teacher": ("teacher.", "backbone."),
+            "student": ("student.", "backbone."),
+            "backbone": ("backbone.",),
+        }
+        if encoder not in prefixes:
+            raise ValueError(f"encoder must be one of {tuple(prefixes)}, got {encoder!r}")
+
+        state = loaded["state_dict"]
+        for prefix in prefixes[encoder]:
+            backbone_state = {
+                name.removeprefix(prefix): value
+                for name, value in state.items()
+                if name.startswith(prefix)
+            }
+            if backbone_state:
+                backbone.load_state_dict(backbone_state)
+                return cls(backbone, **kwargs)
+
+        raise ValueError(f"Checkpoint does not contain weights for encoder {encoder!r}.")
 
     def train(self, mode: bool = True) -> "MotionWindowClassifier":
         """Keep a frozen backbone in eval mode; Lightning will not do it for you.
