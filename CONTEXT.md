@@ -83,7 +83,12 @@ _Avoid_: label type, taxonomy, namespace
 The fixed set of labels a benchmark scores, and the integer each maps to. Annotations
 say what a sample *is*; a vocabulary says which answers are *admissible* and in what
 order. Labels present in the data but absent from the vocabulary are out of scope for
-that benchmark, not errors.
+that benchmark, not errors. BABEL ships one frequency-ordered list of 150;
+`babel_action_60` and `babel_action_120` are its index prefixes, materialized as their own
+`label_set` rows so a benchmark is named rather than carried around as a cutoff. `transition`
+belongs to none of them — `action_label_2_idx.json` gives it no index at all, despite its being
+19% of `act_cat` rows. The three sets cover 70.3%, 75.3% and 76.0% of annotation rows, so the
+90 labels between 60 and 150 are worth 5.7 points of coverage between them.
 _Avoid_: class list, label map, classes
 
 **Corpus policy**:
@@ -101,7 +106,9 @@ offset from one sample by `RandomWindowCollate`. A window is what the model sees
 patch is how that window is tokenized. Samples shorter than a window are excluded by
 `MotionViewSpec.min_frames`, not padded — 22.8% of `pretrain_v1/train` samples but only
 8.0% of its frames, and a zero-padded window would otherwise fill the context set with
-tokens that score as motionless.
+tokens that score as motionless. Offsets are random while training and
+deterministic while evaluating: a random validation crop moves the metric for reasons
+unrelated to the model, and `ModelCheckpoint` then selects on crop luck.
 _Avoid_: clip, crop, patch
 
 **Patch**:
@@ -129,3 +136,47 @@ top-k. `tau` interpolates: small sharpens toward deterministic top-k, large flat
 toward uniform, and `<= 0` is plain random masking, which makes the ablation baseline
 the same function rather than a second code path.
 _Avoid_: importance sampling, saliency masking, hard mining
+
+**Backbone**:
+The `nn.Module` that turns a window into tokens and nothing else: patch projection,
+positional encoding, transformer blocks, final norm. Built from an `EncoderSpec` — what a
+YAML `encoder:` block maps to, and what travels in a checkpoint's hparams so a classifier
+reloads without being told the architecture twice. Every objective owns one (JEPA will own
+two, which is why "the encoder" is not a usable name); no objective's decoder, mask token or
+prediction head belongs to it. Exposes `embed_tokens` (full grid), `embed` (pooled) and
+`grid_shape`. Lives under `architecture/`, which holds no Lightning and no training.
+_Avoid_: encoder, feature extractor, trunk
+
+**Pretext objective**:
+A self-supervised training task over a backbone: what is hidden, what is predicted, what the
+loss is. One `LightningModule` per objective under `models/` — masked reconstruction today,
+JEPA later. MAE and MAMP are *not* separate objectives: they are one
+`MaskedMotionAutoencoder` at two configurations, differing in `tau` (uniform vs motion-aware
+masking) and `loss_channels` (pose vs `vel`). MAMP differences raw joint coordinates to get a
+motion target because motion is absent from its input; here `vel` is a stored channel, so the
+target is a channel selection rather than a computation.
+_Avoid_: model, task, head
+
+**Label coverage**:
+The fraction of a window's frames spanned by one action category, measured from the `act_cat`
+segments overlapping that crop. A window's target is the multi-hot vector of every label whose
+coverage reaches `label_min_coverage` (0.15) — the same definition serving the loss and the
+metric, so "present" never means two things. Windows are not cut to segment boundaries: at a
+median segment length of 1.1 s a 4 s window spans several, which is what multi-label is for.
+Deliberately not BABEL's official protocol, which scores one label per chunk and duplicates a
+*k*-label segment into *k* samples, capping such a chunk at 50% Top-1. Comparability to
+published BABEL numbers is given up on purpose, in exchange for a loss with no ceiling and a
+downstream path that reuses the pretraining one. Labels outside the chosen vocabulary
+contribute nothing, so a window covering only out-of-scope segments trains as an all-negative
+example rather than being dropped: dropping would bias evaluation toward the segments that
+happen to carry scoreable labels, and at 19% `transition` that bias is not small.
+_Avoid_: chunk, multi-hot, annotation
+
+**Protocol**:
+How a pretrained backbone is evaluated. *Linear probe*: backbone frozen and in `eval()`,
+excluded from the optimizer, pooled over the whole grid to `d_model`, then
+`BatchNorm1d(affine=False)` and one `Linear`. *Finetune*: backbone trainable, pooled over time
+only so the DOF axis survives into `43 * d_model`, MLP head. Held as independent knobs on
+`MotionWindowClassifier` — `pool`, `head`, `freeze_backbone` — never an enum, so a frozen
+backbone under a deep head stays expressible as the control it is.
+_Avoid_: eval mode, task head, downstream mode
