@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sometria.architecture.encoder import EncoderSpec, MotionTransformerEncoder
 from sometria.masking import MaskSpec, extract_motion
 from sometria.models.mamp import MaskedMotionPredictor
+from sometria.representation import channel_names
 
 SPEC = EncoderSpec(d_model=32, depth=1, num_heads=4)
 D = SPEC.num_dofs
@@ -151,6 +152,32 @@ def test_a_checkpoint_reloads_without_being_told_the_architecture():
     for (name, a), (_, b) in zip(model.state_dict().items(), reloaded.state_dict().items()):
         assert t.equal(a, b), name
 
+
+def test_the_channel_losses_add_back_up_to_the_loss():
+    """A breakdown, not a reweighting: every channel holds the same number of slots."""
+
+    model = _model()
+    x = _features()
+    prediction, target, _ = model(x, generator=t.Generator().manual_seed(0))
+
+    split = model.channel_losses(prediction, target)
+    assert tuple(split) == tuple(f"mse/{name}" for name in channel_names(model.loss_channels))
+    assert abs(t.stack(list(split.values())).mean().item()
+               - model.reconstruction_loss(prediction, target).item()) < 1e-5
+
+
+def test_a_channel_loss_is_that_channel_and_no_other():
+    """Channel c is every c-th slot of a token, because a token flattens (patch, C)."""
+
+    model = _model(norm_targets=False)
+    width = len(model.channel_names)
+    target = t.zeros(1, 4, SPEC.patch_size * width)
+    prediction = t.zeros_like(target)
+    prediction[..., 1::width] = 2.0     # the whole error sits in channel 1
+
+    split = list(model.channel_losses(prediction, target).values())
+    assert split[1].item() == 4.0
+    assert all(v.item() == 0.0 for i, v in enumerate(split) if i != 1)
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):

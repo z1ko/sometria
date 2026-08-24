@@ -66,6 +66,18 @@ def _dof_indices(human: dict, key: str) -> list[int]:
     return [index[n] for n in names]
 
 
+def channel_names(indices: tuple[int, ...] | None = None) -> tuple[str, ...]:
+    """Feature-channel names, by index into :attr:`Representation.channels`.
+
+    A model logging a per-channel breakdown wants the names without needing the DOF list
+    a full :class:`Representation` is built from.
+    """
+
+    if indices is None:
+        return Representation.channels
+    return tuple(Representation.channels[i] for i in indices)
+
+
 class Representation:
     """The feature layout: what the five channels mean and how to move between them."""
 

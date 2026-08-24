@@ -47,8 +47,10 @@ from sometria.models.window import (
     MaskedWindow,
     mask_window,
     masked_token_mse,
+    per_channel_mse,
     standardize_tokens,
 )
+from sometria.representation import channel_names
 
 
 class MaskedMotionPredictor(PretextObjective):
@@ -126,6 +128,7 @@ class MaskedMotionPredictor(PretextObjective):
         self.loss_channels = tuple(loss_channels)
         self.register_buffer("loss_channel_index", t.tensor(self.loss_channels, dtype=t.long))
         self.prediction = nn.Linear(spec.d_model, spec.patch_size * len(self.loss_channels))
+        self.channel_names = channel_names(self.loss_channels)
 
         nn.init.normal_(self.mask_token, std=0.02)
 
@@ -180,7 +183,19 @@ class MaskedMotionPredictor(PretextObjective):
             target = standardize_tokens(target)
         return masked_token_mse(prediction, target)
 
+    def channel_losses(self, prediction: t.Tensor, target: t.Tensor) -> dict[str, t.Tensor]:
+        """The reconstruction loss, split by which feature channel carries it."""
+
+        if self.norm_targets:
+            target = standardize_tokens(target)
+
+        split = per_channel_mse(prediction, target, len(self.channel_names))
+        return {f"mse/{n}": v for n, v in zip(self.channel_names, split, strict=True)}
+
     def step(self, batch: dict) -> tuple[t.Tensor, dict[str, t.Tensor | float]]:
         prediction, target, window = self(batch["features"])
         loss = self.reconstruction_loss(prediction, target)
-        return loss, {"context_tokens": float(window.mask.context.shape[1])}
+        return loss, {
+            "context_tokens": float(window.mask.context.shape[1]),
+            **self.channel_losses(prediction, target),
+        }

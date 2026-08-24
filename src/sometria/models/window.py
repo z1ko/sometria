@@ -95,6 +95,27 @@ def masked_token_mse(prediction: t.Tensor, target: t.Tensor) -> t.Tensor:
     return (prediction - target).square().mean()
 
 
+def per_channel_mse(prediction: t.Tensor, target: t.Tensor, num_channels: int) -> t.Tensor:
+    """:func:`masked_token_mse` split by feature channel -- ``(num_channels,)``.
+
+    A token flattens ``(patch_size, C)``, so channel ``c`` holds every ``C``-th slot of
+    it. Every channel holds the same number of slots, so these average back to the loss
+    itself: this reports where the loss already is, it does not reweight anything.
+
+    Worth logging because a token is standardized over all its channels at once, not per
+    channel. A channel that is unpredictable at patch resolution -- acceleration, torque
+    -- can then hold most of the squared error while contributing nothing learnable, and
+    a reconstruction loss that looks flat is indistinguishable from one that is being
+    spent entirely on noise.
+    """
+
+    if prediction.numel() == 0:
+        return prediction.new_zeros(num_channels)
+
+    error = (prediction - target).square()
+    return error.reshape(*error.shape[:-1], -1, num_channels).mean(dim=(0, 1, 2))
+
+
 def standardize_tokens(target: t.Tensor, eps: float = 1.0e-6) -> t.Tensor:
     """Zero mean and unit variance per token, over its own values.
 
