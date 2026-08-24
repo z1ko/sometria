@@ -35,7 +35,7 @@ encoder:
 
 model:
   name: classifier
-  checkpoint: null       # e.g. runs/mamp/lightning_logs/version_0/checkpoints/last.ckpt
+  checkpoint: runs/mae/lightning_logs/version_0/checkpoints/epoch=9-step=7240.ckpt       # e.g. runs/mamp/lightning_logs/version_0/checkpoints/last.ckpt
   pool: window           # -> d_model
   head: linear
   freeze_backbone: true

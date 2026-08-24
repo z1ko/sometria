@@ -1,17 +1,20 @@
 """Run with: python tests/test_downstream.py"""
 
+import pickle
 import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+import polars as pl
 import torch as t
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sometria.architecture.encoder import EncoderSpec
 from sometria.architecture.scheduler import lr_schedule
-from sometria.downstream.dataset import _tiles
+from sometria.downstream.dataset import LabelledWindows, _tiles
 from sometria.downstream.classifier import MotionWindowClassifier
 from sometria.downstream.labels import window_multi_hot
 from sometria.downstream.metrics import WindowMeanAveragePrecision
@@ -93,6 +96,37 @@ def test_tiles_cover_the_whole_motion_including_its_tail():
 
     assert _tiles(480, 240) == [0, 240]                       # exact fit, no extra tile
     assert _tiles(239, 240) == []                             # too short to score at all
+
+
+class _FakeMotions:
+    """A MotionDataset that loads nothing: n samples of one flat window each."""
+
+    def __init__(self, n: int) -> None:
+        self.samples = pl.DataFrame({"n_frames": [240] * n})
+
+    def __getitem__(self, index: int) -> dict:
+        return {
+            "features": t.zeros(240, D, C),
+            "time": t.arange(240) / 60.0,
+            "hz": 60.0,
+            "sample_id": f"s{index}",
+        }
+
+
+def test_a_windows_dataset_carries_no_tensor_into_a_worker():
+    """torch's pickler moves every tensor into shared memory, and forkserver refuses past
+    256 file descriptors -- `ValueError: too many fds` at 4,600 labelled samples, before
+    the first batch. Segments stay numpy; the window still gets a tensor target.
+    """
+
+    n = 300
+    segments = {f"s{i}": np.array([[0.0, 4.0, 1]], dtype=np.float32) for i in range(n)}
+    dataset = LabelledWindows(_FakeMotions(n), segments, num_labels=LABELS, window_frames=240)
+
+    assert not any(isinstance(v, t.Tensor) for v in dataset.segments.values())
+    assert pickle.loads(pickle.dumps(dataset.segments))["s7"].shape == (1, 3)
+    assert dataset[0]["labels"][1] == 1.0
+    assert dataset[0]["features"].shape == (240, D, C)
 
 
 def test_both_learning_rates_decay():

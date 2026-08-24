@@ -13,6 +13,7 @@ a window is never padded.
 from pathlib import Path
 
 import lightning as L
+import numpy as np
 from omegaconf import DictConfig
 import polars as pl
 import torch as t
@@ -55,7 +56,7 @@ class LabelledWindows(t.utils.data.Dataset):
     def __init__(
         self,
         motions: MotionDataset,
-        segments: dict[str, t.Tensor],
+        segments: dict[str, np.ndarray],
         *,
         num_labels: int,
         window_frames: int,
@@ -95,7 +96,10 @@ class LabelledWindows(t.utils.data.Dataset):
 
         start_t = float(item["time"][start])
         end_t = start_t + self.window_frames / float(item["hz"])
-        segments = self.segments.get(item["sample_id"], t.zeros(0, 3))
+        # from_numpy is a view, not a copy -- see load_label_segments for why the
+        # dict cannot hold tensors in the first place.
+        rows = self.segments.get(item["sample_id"])
+        segments = t.zeros(0, 3) if rows is None else t.from_numpy(rows)
 
         return {
             "features": features[start : start + self.window_frames],

@@ -18,6 +18,7 @@ toward the segments that happen to carry scoreable labels.
 
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import torch as t
 
@@ -51,12 +52,19 @@ def load_label_segments(
     *,
     label_set: str,
     sample_ids: list[str] | None = None,
-) -> tuple[dict[str, t.Tensor], int]:
-    """Return ``{sample_id: (n, 3) tensor of [start_t, end_t, label_index]}``.
+) -> tuple[dict[str, np.ndarray], int]:
+    """Return ``{sample_id: (n, 3) array of [start_t, end_t, label_index]}``.
 
     Annotations whose label is absent from ``label_set`` are dropped here rather than in
     the dataset: they are out of scope for this benchmark, not errors, and the windows
     covering them still train as negatives.
+
+    Numpy rather than torch, and this is not cosmetic. The dataset holding this dict is
+    pickled into every DataLoader worker, and torch's pickler moves each tensor into
+    shared memory, which costs one file descriptor per tensor. ``forkserver`` refuses to
+    pass more than 256 to a child, so a few thousand samples killed the run outright with
+    ``ValueError: too many fds``. An array pickles as bytes; :class:`LabelledWindows`
+    wraps one in a tensor per item, which is a free view.
     """
 
     vocabulary, num_labels = load_label_vocabulary_index(root, label_set)
@@ -76,7 +84,7 @@ def load_label_segments(
     ).select("sample_id", "start_t", "end_t", "label_index")
 
     segments = {
-        sample_id: t.tensor(rows, dtype=t.float32).reshape(-1, 3)
+        sample_id: np.asarray(rows, dtype=np.float32).reshape(-1, 3)
         for sample_id, rows in (
             joined.group_by("sample_id")
             .agg(pl.concat_list("start_t", "end_t", "label_index").flatten())
