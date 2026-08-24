@@ -103,9 +103,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train a Sometria model.")
     parser.add_argument("--config", type=Path, default=Path("config/experiment_mamp.yaml"))
     parser.add_argument("--output", type=Path, default=Path("runs/mamp"))
-    args = parser.parse_args()
+    # Unknown arguments are OmegaConf dotlist overrides -- `model.decoder_depth=6`,
+    # `training.seed=1`. An ablation is then a shell loop over one key, and the config
+    # file stays the baseline every run is a delta from.
+    args, overrides = parser.parse_known_args()
 
-    config = OmegaConf.load(args.config)
+    config = OmegaConf.merge(
+        OmegaConf.load(args.config), OmegaConf.from_dotlist(overrides)
+    )
+    # The resolved config beside the run, overrides already applied: an ablation's
+    # output directory then says what produced it without trusting shell history.
+    args.output.mkdir(parents=True, exist_ok=True)
+    OmegaConf.save(config, args.output / "config.yaml")
+
     train(config, args.output)
 
 
