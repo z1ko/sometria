@@ -4,9 +4,9 @@
     python scripts/results.py runs/mae_probes val/macro_map
 
 One line per run: the best value the metric reached, and which epoch it happened on.
-Direction follows the same rule ``train.py`` gives ``ModelCheckpoint`` -- a metric whose
-name ends in ``map`` is maximized, everything else is minimized -- so what this reports
-is the number the checkpoint was selected on.
+Direction follows the metric's name: anything scored upward -- ``map``, ``f1s``,
+``rec`` -- is maximized, and everything else (losses, errors) is minimized. Note that ``acc`` is
+absent on purpose: ``val/mse/acc`` is the acceleration channel's error, not an accuracy.
 
 Runs are the immediate subdirectories of ``root``; the latest ``version_*`` of each wins,
 because a rerun of the same ablation is a correction, not a second sample.
@@ -16,6 +16,14 @@ import sys
 from pathlib import Path
 
 import polars as pl
+
+
+# Suffixes of the metrics that are better when larger. Everything else is a loss.
+HIGHER_IS_BETTER = ("map", "f1s", "rec", "auc")
+
+
+def maximize(metric: str) -> bool:
+    return metric.endswith(HIGHER_IS_BETTER)
 
 
 def best(run: Path, metric: str) -> tuple[float, int] | None:
@@ -33,7 +41,7 @@ def best(run: Path, metric: str) -> tuple[float, int] | None:
     if rows.is_empty():
         return None
 
-    row = rows.sort(metric, descending=metric.endswith("map")).row(0)
+    row = rows.sort(metric, descending=maximize(metric)).row(0)
     return float(row[1]), int(row[0])
 
 
@@ -52,7 +60,7 @@ def main() -> None:
     width = max(len(name) for name in found)
     print(f"{'run':<{width}}  {metric:>12}  epoch")
     for name, (value, epoch) in sorted(
-        found.items(), key=lambda kv: kv[1][0], reverse=metric.endswith("map")
+        found.items(), key=lambda kv: kv[1][0], reverse=maximize(metric)
     ):
         print(f"{name:<{width}}  {value:>12.4f}  {epoch:>5}")
 
