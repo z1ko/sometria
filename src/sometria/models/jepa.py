@@ -184,6 +184,20 @@ class MotionJEPA(L.LightningModule):
     def validation_step(self, batch: dict, batch_idx: int) -> t.Tensor:
         return self._step(batch, "val")
 
+    def train(self, mode: bool = True) -> "MotionJEPA":
+        """Keep the teacher in eval mode; Lightning will not do it for you.
+
+        ``requires_grad_(False)`` stops gradients but not dropout, and not a BatchNorm's
+        running statistics. A teacher that drops units while computing the target makes
+        the target stochastic, so the student is asked to predict a different vector each
+        time it sees the same window -- and the EMA copies the student's buffers over
+        anyway, so any statistic the teacher gathered would be discarded.
+        """
+
+        super().train(mode)
+        self.teacher.eval()
+        return self
+
     @t.no_grad()
     def update_teacher(self, ema: float) -> None:
         for student_param, teacher_param in zip(

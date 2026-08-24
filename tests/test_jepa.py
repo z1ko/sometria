@@ -68,6 +68,23 @@ def test_ema_moves_teacher_only_toward_student():
         assert t.allclose(student_param, student_before[name] + 1.0)
 
 
+def test_the_teacher_target_is_deterministic_while_training():
+    """requires_grad_(False) stops the gradient, not dropout: the teacher must be in eval."""
+
+    spec = EncoderSpec(d_model=32, depth=1, num_heads=4, dropout=0.5)
+    model = MotionJEPA(spec, MaskSpec(mask_ratio=0.25), predictor_depth=1)
+    model.train()
+    x = _features(batch=1)
+
+    assert not model.teacher.training and model.student.training
+
+    with t.no_grad():
+        _, first, _ = model(x, generator=t.Generator().manual_seed(0))
+        _, second, _ = model(x, generator=t.Generator().manual_seed(0))
+
+    assert t.equal(first, second)
+
+
 def test_the_student_never_encodes_a_target_token():
     """Encoding must depend on context values only, or the objective is trivial."""
 
