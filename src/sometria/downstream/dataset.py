@@ -195,3 +195,65 @@ class LabelledMotionDataModule(L.LightningDataModule):
 
     def val_dataloader(self):
         return self._loader(self.val_dataset, shuffle=False)
+
+
+class LabelledWindowsEx(t.utils.data.Dataset):
+    def __init__(
+        self,
+        motions: MotionDataset,
+        segments: dict[str, np.ndarray],
+        *,
+        num_labels: int,
+        window_frames: int,
+        min_coverage: float = LABEL_MIN_COVERAGE,
+        tiles: bool = False,
+    ) -> None:
+        super().__init__()
+
+        self.motions = motions
+        self.segments = segments
+        self.num_labels = num_labels
+        self.window_frames = window_frames
+        self.min_coverage = min_coverage
+        self.tiles = tiles
+
+        frames = motions.samples["n_frames"].to_list()
+        if tiles:
+            self.index = [
+                (i, start) 
+                for i, n in enumerate(frames) 
+                for start in _tiles(n, window_frames)
+            ]
+        else:
+            self.index = [(i, None) for i, n in enumerate(frames) if n >= window_frames]
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __getitem__(self, index: int) -> dict:
+        sample_index, start = self.index[index]
+        
+        # Load sample directly without non-thread-safe cached state
+        item = self.motions[sample_index]
+        features = item["features"]
+
+        if start is None:
+            # Pick a random frame offset for training
+            max_start = features.shape[0] - self.window_frames
+            start = int(t.randint(0, max_start + 1, ()).item())
+
+        start_t = float(item["time"][start])
+        end_t = start_t + self.window_frames / float(item["hz"])
+
+        rows = self.segments.get(item["sample_id"])
+        segments = t.zeros(0, 3) if rows is None else t.from_numpy(rows)
+
+        labels = window_multi_hot(
+            segments, start_t, end_t, self.num_labels, self.min_coverage
+        )
+
+        return {
+            "features": features[start : start + self.window_frames],
+            "labels": labels,
+            "sample_id": item["sample_id"],
+        }

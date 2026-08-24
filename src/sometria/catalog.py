@@ -291,4 +291,9 @@ def create_pretrain_split(
         )
     )
 
-    return upsert_table(output_root, SPLITS, pretrain, keys=["sample_id", "split_set"])
+    return upsert_table(
+        output_root, 
+        SPLITS, 
+        pretrain, 
+        keys=["sample_id", "split_set"]
+    )

@@ -44,7 +44,7 @@ def load_label_vocabulary_index(
             f"no label vocabulary {label_set!r} in {root}; "
             "import it with sometria.babel.import_babel_action_vocabulary"
         )
-    return vocabulary, vocabulary["label_index"].max() + 1
+    return vocabulary, vocabulary["label_index"].max() + 1 # type: ignore
 
 
 def load_label_segments(
@@ -137,3 +137,49 @@ def window_multi_hot(
         0, segments[:, 2].long(), overlap / (end_t - start_t)
     )
     return target.masked_fill(coverage >= min_coverage, 1.0)
+
+def window_multi_hot_ex(
+    segments: t.Tensor,
+    start_t: float,
+    end_t: float,
+    num_labels: int,
+    min_coverage: float = LABEL_MIN_COVERAGE,
+) -> t.Tensor:
+    """Multi-hot target for the window ``[start_t, end_t)``, from one sample's segments."""
+
+    target = t.zeros(num_labels, dtype=t.float32)
+    duration = end_t - start_t
+
+    if segments.numel() == 0 or duration <= 0.0:
+        return target
+
+    # Calculate interval intersections with window [start_t, end_t]
+    starts = segments[:, 0].clamp(min=start_t)
+    ends = segments[:, 1].clamp(max=end_t)
+    overlaps = (ends - starts).clamp(min=0.0)
+
+    # Filter out non-overlapping segments early
+    valid_mask = overlaps > 0.0
+    if not valid_mask.any():
+        return target
+
+    valid_overlaps = overlaps[valid_mask]
+    label_ids = segments[valid_mask, 2].long()
+
+    # Guard against invalid label indices
+    label_mask = (label_ids >= 0) & (label_ids < num_labels)
+    if not label_mask.any():
+        return target
+
+    valid_overlaps = valid_overlaps[label_mask]
+    label_ids = label_ids[label_mask]
+
+    # Compute maximum coverage per label without double-counting overlapping intervals of the same class
+    # For disjoint segments of the same label, sum per unique class index
+    coverage = t.zeros(num_labels, dtype=t.float32)
+    coverage.index_add_(0, label_ids, valid_overlaps / duration)
+
+    # Clamp coverage to 1.0 max in case overlapping annotations of the same class pushed it over 100%
+    coverage = coverage.clamp(max=1.0)
+
+    return (coverage >= min_coverage).float()

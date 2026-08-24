@@ -18,8 +18,6 @@ import torch.nn as nn
 from sometria.architecture.pos_embed import PositionalEncoding
 from sometria.masking import gather_tokens, patchify
 
-POOLINGS = ("window", "dof")
-
 
 @dataclass(frozen=True)
 class EncoderSpec:
@@ -93,16 +91,6 @@ class EncoderSpec:
         if channels != self.num_features:
             raise ValueError(f"Expected {self.num_features} features, got {channels}.")
 
-    def pooled_dim(self, pool: str) -> int:
-        """Width of :meth:`MotionTransformerEncoder.embed` under one pooling."""
-
-        if pool == "window":
-            return self.d_model
-        if pool == "dof":
-            return self.num_dofs * self.d_model
-        raise ValueError(f"pool must be one of {POOLINGS}, got {pool!r}")
-
-
 def as_backbone(
     backbone: "MotionTransformerEncoder | EncoderSpec | dict | None",
 ) -> "MotionTransformerEncoder":
@@ -164,7 +152,6 @@ class MotionTransformerEncoder(nn.Module):
 
         self.projection = nn.Linear(self.spec.token_dim, self.spec.d_model)
         self.position = PositionalEncoding(time_patches, num_dofs, self.spec.d_model)
-
         self.blocks = transformer_stack(self.spec, self.spec.depth)
 
     @property
@@ -179,7 +166,8 @@ class MotionTransformerEncoder(nn.Module):
         """
 
         self.spec.check_features(features)
-        return patchify(features, self.spec.patch_size).flatten(start_dim=-2)
+        patches = patchify(features, self.spec.patch_size)
+        return patches.flatten(start_dim=-2)
 
     def embed_tokens(
         self,
@@ -223,21 +211,39 @@ class MotionTransformerEncoder(nn.Module):
         # an all-False mask costs ~35% of a full-grid encode by disabling its fused path.
         return self.blocks(x)
 
-    def embed(self, features: t.Tensor, *, pool: str = "window") -> t.Tensor:
-        """Pooled convenience over :meth:`embed_tokens`.
 
-        ``pool="window"`` means over the whole grid to ``d_model``; ``pool="dof"`` means
-        over time only, so the per-joint axis survives into ``num_dofs * d_model``.
-        """
+ENCODER_PREFIXES = {
+    "teacher": ("teacher.", "backbone."),
+    "student": ("student.", "backbone."),
+    "backbone": ("backbone.",),
+}
 
-        if pool not in POOLINGS:
-            raise ValueError(f"pool must be one of {POOLINGS}, got {pool!r}")
 
-        tokens = self.embed_tokens(features)
-        batch, length, width = tokens.shape
+def load_encoder(checkpoint: str, encoder: str = "teacher") -> MotionTransformerEncoder:
+    """The backbone of a pretrained objective, rebuilt from its checkpoint alone.
 
-        if pool == "window":
-            return tokens.mean(dim=1)
+    The spec travels in the objective's hparams, so the architecture is read back rather
+    than restated. Which submodule holds the weights depends on the objective -- JEPA has
+    a teacher and a student, a masked objective has one backbone -- and everything else
+    in the checkpoint (decoder, predictor, mask token, prediction head) is scaffolding
+    that existed to train these weights and is dropped here.
+    """
 
-        grid = tokens.reshape(batch, length // self.spec.num_dofs, self.spec.num_dofs, width)
-        return grid.mean(dim=1).flatten(start_dim=1)
+    if encoder not in ENCODER_PREFIXES:
+        raise ValueError(f"encoder must be one of {tuple(ENCODER_PREFIXES)}, got {encoder!r}")
+
+    loaded = t.load(checkpoint, map_location="cpu")
+    backbone = MotionTransformerEncoder(EncoderSpec(**loaded["hyper_parameters"]["backbone"]))
+
+    state = loaded["state_dict"]
+    for prefix in ENCODER_PREFIXES[encoder]:
+        weights = {
+            name.removeprefix(prefix): value
+            for name, value in state.items()
+            if name.startswith(prefix)
+        }
+        if weights:
+            backbone.load_state_dict(weights)
+            return backbone
+
+    raise ValueError(f"{checkpoint} holds no weights for encoder {encoder!r}.")

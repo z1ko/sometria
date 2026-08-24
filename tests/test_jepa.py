@@ -8,9 +8,8 @@ import torch as t
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sometria.architecture.encoder import EncoderSpec
+from sometria.architecture.encoder import EncoderSpec, load_encoder
 from sometria.masking import MaskSpec
-from sometria.downstream.classifier import MotionWindowClassifier
 from sometria.models.jepa import MotionJEPA
 from sometria.models.window import masked_token_mse
 
@@ -113,7 +112,7 @@ def test_the_student_never_encodes_a_target_token():
     assert t.allclose(before, after, atol=1e-5)
 
 
-def test_checkpoint_round_trip_through_classifier_from_pretrained():
+def test_checkpoint_round_trip_through_load_encoder():
     model = _model()
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "jepa.ckpt"
@@ -126,13 +125,13 @@ def test_checkpoint_round_trip_through_classifier_from_pretrained():
             },
             path,
         )
-        teacher = MotionWindowClassifier.from_pretrained(path, num_labels=3)
-        student = MotionWindowClassifier.from_pretrained(path, encoder="student", num_labels=3)
+        teacher = load_encoder(path, "teacher")
+        student = load_encoder(path, "student")
 
-    assert teacher.backbone.spec == SPEC
-    assert student.backbone.spec == SPEC
-    teacher_state = teacher.backbone.state_dict()
-    student_state = student.backbone.state_dict()
+    assert teacher.spec == SPEC
+    assert student.spec == SPEC
+    teacher_state = teacher.state_dict()
+    student_state = student.state_dict()
     for name, expected in model.teacher.state_dict().items():
         assert t.equal(teacher_state[name], expected), name
     for name, expected in model.student.state_dict().items():

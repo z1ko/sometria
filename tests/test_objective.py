@@ -40,7 +40,7 @@ class Stub(PretextObjective):
         self.freeze = freeze
 
     def step(self, batch):
-        pooled = self.backbone.embed(batch["features"])
+        pooled = self.backbone.embed_tokens(batch["features"]).mean(dim=1)
         out = self.head(pooled)
         return out.square().mean(), {"spread": out.std(), "count": float(out.shape[0])}
 

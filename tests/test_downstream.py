@@ -12,12 +12,12 @@ import torch as t
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sometria.architecture.encoder import EncoderSpec
+from sometria.architecture.encoder import EncoderSpec, MotionTransformerEncoder, load_encoder
 from sometria.architecture.scheduler import lr_schedule
 from sometria.downstream.dataset import LabelledWindows, _tiles
-from sometria.downstream.classifier import MotionWindowClassifier
+from sometria.downstream.classifier import MotionLinearClassifier
 from sometria.downstream.labels import window_multi_hot
-from sometria.downstream.metrics import WindowMeanAveragePrecision
+from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAveragePrecision
 from sometria.models.masked import MaskedMotionAutoencoder
 
 SPEC = EncoderSpec(d_model=32, depth=1, num_heads=4)
@@ -154,20 +154,46 @@ def test_both_learning_rates_decay():
 
 # --- protocol -------------------------------------------------------------------------
 
-def test_the_two_poolings_give_the_head_the_widths_the_protocol_asks_for():
-    probe = MotionWindowClassifier(SPEC, num_labels=LABELS, pool="window", head="linear")
-    finetune = MotionWindowClassifier(SPEC, num_labels=LABELS, pool="dof", head="mlp",
-                                      freeze_backbone=False)
+def _probe(pool="mean", **kwargs):
+    return MotionLinearClassifier(
+        MotionTransformerEncoder(SPEC), num_labels=LABELS, pool=pool, **kwargs
+    )
+
+
+def test_every_pooling_gives_the_head_the_width_it_advertises():
+    widths = {"mean": SPEC.d_model, "mean_max": 2 * SPEC.d_model,
+              "attentive": SPEC.d_model, "attentive_factorized": SPEC.d_model}
 
     x = _features()
-    assert probe(x).shape == (2, LABELS)
-    assert finetune(x).shape == (2, LABELS)
-    assert probe.head[1].in_features == SPEC.d_model
-    assert finetune.head[1].in_features == D * SPEC.d_model
+    for pool, width in widths.items():
+        model = _probe(pool)
+        assert model(x).shape == (2, LABELS), pool
+        assert model.head[1].in_features == width, pool
 
 
-def test_a_frozen_backbone_stays_frozen_and_in_eval():
-    model = MotionWindowClassifier(SPEC, num_labels=LABELS, freeze_backbone=True)
+def test_a_pooler_reads_the_grid_not_a_flat_sequence():
+    """Factorized attention has to split T x D the way the encoder laid the tokens out."""
+
+    model = _probe("attentive_factorized").eval()
+    x = _features(batch=1)
+    with t.no_grad():
+        tokens = model.backbone.embed_tokens(x)
+        # uniform scores collapse both softmaxes to a mean, which is the mean pooler
+        for net in (model.pooler.s_score_net, model.pooler.t_score_net):
+            t.nn.init.zeros_(net[0].weight); t.nn.init.zeros_(net[0].bias)
+            t.nn.init.zeros_(net[2].weight)
+        assert t.allclose(model.pooler(tokens), tokens.mean(dim=1), atol=1e-5)
+
+
+def test_a_shorter_window_still_pools():
+    """T comes from the token count; the pooler must not bake in the full window."""
+
+    model = _probe("attentive_factorized")
+    assert model(_features(frames=120)).shape == (2, LABELS)
+
+
+def test_the_backbone_stays_frozen_and_in_eval():
+    model = _probe()
     model.train()
 
     assert not model.backbone.training
@@ -181,18 +207,23 @@ def test_a_frozen_backbone_stays_frozen_and_in_eval():
     assert not any(id(p) in backbone_ids for g in optimizer.param_groups for p in g["params"])
 
 
-def test_an_unfrozen_backbone_receives_gradient():
-    model = MotionWindowClassifier(SPEC, num_labels=LABELS, freeze_backbone=False, head="mlp",
-                                   pool="dof")
-    loss = model.loss(model(_features()), t.zeros(2, LABELS))
-    loss.backward()
-    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.backbone.parameters())
+def test_the_pooler_is_trained_along_with_the_head():
+    """An attentive pooler left out of the optimizer is a random projection forever."""
+
+    model = _probe("attentive_factorized")
+    model._trainer = SimpleNamespace(estimated_stepping_batches=10)
+    optimizer = model.configure_optimizers()["optimizer"]
+
+    optimized = {id(p) for g in optimizer.param_groups for p in g["params"]}
+    assert optimized == {id(p) for p in [*model.pooler.parameters(), *model.head.parameters()]}
+
+    model.loss(model(_features()), t.zeros(2, LABELS)).backward()
+    assert all(p.grad is not None for p in model.pooler.parameters())
 
 
 def test_a_probe_leaves_the_backbone_untouched():
-    model = MotionWindowClassifier(SPEC, num_labels=LABELS, freeze_backbone=True)
-    loss = model.loss(model(_features()), t.zeros(2, LABELS))
-    loss.backward()
+    model = _probe()
+    model.loss(model(_features()), t.zeros(2, LABELS)).backward()
     assert all(p.grad is None for p in model.backbone.parameters())
 
 
@@ -209,12 +240,19 @@ def test_a_pretrained_backbone_arrives_with_its_weights():
             },
             path,
         )
-        model = MotionWindowClassifier.from_pretrained(str(path), num_labels=LABELS)
+        backbone = load_encoder(str(path), "backbone")
 
-    assert model.backbone.spec == SPEC
-    assert t.equal(
-        model.backbone.projection.weight, objective.backbone.projection.weight
-    )
+    assert backbone.spec == SPEC
+    assert t.equal(backbone.projection.weight, objective.backbone.projection.weight)
+
+
+def test_top_k_recall_counts_positives_inside_the_top_k():
+    metric = MultilabelTopKRecall(top_k=2)
+    # two positives per row; the first row ranks both first, the second ranks one
+    logits = t.tensor([[9.0, 8.0, 0.0, 0.0], [9.0, 0.0, 0.0, 8.0]])
+    target = t.tensor([[1, 1, 0, 0], [1, 1, 0, 0]])
+    metric.update(logits, target)
+    assert metric.compute().item() == 0.75
 
 
 if __name__ == "__main__":

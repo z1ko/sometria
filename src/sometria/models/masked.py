@@ -143,7 +143,7 @@ class MaskedMotionAutoencoder(PretextObjective):
         decoded = self.decoder(tokens + self.decoder_position.get_flat(window.num_time_patches))
         prediction = self.prediction(decoded)
 
-        target = target_source[..., self.loss_channel_index].flatten(start_dim=-2)
+        target = target_source[..., self.loss_channel_index].flatten(start_dim=-2) # type: ignore
         return window.mask.targets_of(prediction), window.mask.targets_of(target), window
 
     def reconstruction_loss(self, prediction: t.Tensor, target: t.Tensor) -> t.Tensor:

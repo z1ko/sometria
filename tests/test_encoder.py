@@ -59,26 +59,6 @@ def test_embed_tokens_with_an_index_encodes_only_that_subset():
     assert encoder.embed_tokens(x, index=index).shape == (2, 100, SPEC.d_model)
 
 
-def test_poolings_have_the_widths_the_spec_advertises():
-    encoder = MotionTransformerEncoder(SPEC)
-    x = _features()
-    assert encoder.embed(x, pool="window").shape == (2, SPEC.pooled_dim("window"))
-    assert encoder.embed(x, pool="dof").shape == (2, SPEC.pooled_dim("dof"))
-    assert SPEC.pooled_dim("dof") == D * SPEC.d_model
-
-
-def test_dof_pooling_keeps_the_joint_axis_separate():
-    """Slice ``d`` of the pooled vector is DOF ``d`` averaged over time, nothing else."""
-
-    encoder = MotionTransformerEncoder(SPEC).eval()
-    x = _features(batch=1)
-    with t.no_grad():
-        pooled = encoder.embed(x, pool="dof").reshape(D, SPEC.d_model)
-        grid = encoder.embed_tokens(x).reshape(30, D, SPEC.d_model)
-
-    assert t.allclose(pooled, grid.mean(dim=0), atol=1e-5)
-
-
 def test_spec_rejects_a_window_that_does_not_tile():
     try:
         EncoderSpec(window_frames=241, patch_size=8)

@@ -9,9 +9,9 @@ import lightning as L
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
-from sometria.architecture.encoder import EncoderSpec
+from sometria.architecture.encoder import EncoderSpec, MotionTransformerEncoder, load_encoder
 from sometria.dataset import MotionDataModule
-from sometria.downstream.classifier import MotionWindowClassifier
+from sometria.downstream.classifier import MotionLinearClassifier
 from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
 from sometria.masking import MaskSpec
@@ -42,18 +42,22 @@ def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]
         return OBJECTIVES[name](spec, mask, **model_config), MotionDataModule(config)
 
     if name == "classifier":
+        # The mapping from a probe to what it measures is this path, and nothing else:
+        # the pretraining checkpoint carries the spec, so the `encoder:` block below is
+        # only read for the random-initialization control.
         checkpoint = model_config.pop("checkpoint", None)
+        encoder = model_config.pop("encoder", "teacher")
+        backbone = (
+            MotionTransformerEncoder(spec)
+            if checkpoint is None
+            else load_encoder(checkpoint, encoder)
+        )
         # How many labels there are is a property of the vocabulary, not of the run --
         # keeping it in the config too is just a second place for it to be wrong.
         _, model_config["num_labels"] = load_label_vocabulary_index(
             config.dataloader.root, config.dataloader.label_set
         )
-        model = (
-            MotionWindowClassifier(spec, **model_config)
-            if checkpoint is None
-            else MotionWindowClassifier.from_pretrained(checkpoint, **model_config)
-        )
-        return model, LabelledMotionDataModule(config)
+        return MotionLinearClassifier(backbone, **model_config), LabelledMotionDataModule(config)
 
     raise ValueError(f"Unknown model: {name}")
 
