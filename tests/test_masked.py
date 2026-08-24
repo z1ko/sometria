@@ -9,6 +9,7 @@ import torch as t
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sometria.architecture.encoder import EncoderSpec, MotionTransformerEncoder
+from sometria.masking import extract_motion
 from sometria.models.masked import MaskedMotionAutoencoder
 
 SPEC = EncoderSpec(d_model=32, depth=1, num_heads=4)
@@ -26,27 +27,76 @@ def _model(**kwargs):
     return MaskedMotionAutoencoder(SPEC, decoder_depth=1, **kwargs)
 
 
-def test_mae_configuration_predicts_its_target_patches():
-    """tau <= 0: uniform masking, the MAE baseline."""
+def _width(model):
+    return SPEC.patch_size * len(model.loss_channels)
 
-    model = _model(tau=0.0)
+
+def test_mae_configuration_predicts_its_target_patches():
+    """tau <= 0, target="values": uniform masking, reconstruct the input. The MAE baseline."""
+
+    model = _model(tau=0.0, target="values")
     x = _features()
     prediction, target, target_valid, mask = model(x, generator=t.Generator().manual_seed(0))
 
-    assert prediction.shape == target.shape == (2, mask.targets.shape[1], SPEC.token_dim)
+    assert prediction.shape == target.shape == (2, mask.targets.shape[1], _width(model))
     assert target_valid.shape == mask.targets.shape
     assert model.reconstruction_loss(prediction, target, target_valid).isfinite()
 
 
 def test_mamp_configuration_predicts_its_target_patches():
-    """tau > 0: motion-aware masking, loss on the velocity channel."""
+    """tau > 0, target="motion": motion-aware masking, predict the temporal difference."""
 
-    model = _model(tau=0.25, loss_channels=(2,))
+    model = _model(tau=0.80, target="motion")
     x = _features()
     prediction, target, target_valid, mask = model(x, generator=t.Generator().manual_seed(0))
 
-    assert prediction.shape == target.shape == (2, mask.targets.shape[1], SPEC.token_dim)
+    assert prediction.shape == target.shape == (2, mask.targets.shape[1], _width(model))
     assert model.reconstruction_loss(prediction, target, target_valid).isfinite()
+
+
+def test_the_motion_target_is_the_difference_of_the_input_not_a_channel():
+    """MAMP's extract_motion, taken over the window so patch boundaries are real."""
+
+    model = _model(target="motion", motion_stride=1, loss_channels=(0, 1))
+    x = _features(batch=1)
+    _, target, _, mask = model(x, generator=t.Generator().manual_seed(0))
+
+    expected = extract_motion(x, 1)[..., [0, 1]]
+    for k, flat in enumerate(mask.targets[0].tolist()):
+        patch, dof = divmod(flat, D)
+        lo = patch * SPEC.patch_size
+        want = expected[0, lo : lo + SPEC.patch_size, dof].flatten()
+        assert t.allclose(target[0, k], want, atol=1e-6), (patch, dof)
+        if k > 20:
+            break
+
+    # the last frame of the window has no successor and is left at zero, as in the reference
+    assert (extract_motion(x, 1)[0, -1] == 0).all()
+
+
+def test_target_normalization_standardizes_each_token_on_its_own():
+    """norm_skes_loss: the loss asks for the shape of a patch, not its magnitude."""
+
+    model = _model(norm_targets=True, loss_channels=(0,))
+    prediction = t.zeros(1, 2, SPEC.patch_size)
+    target = t.randn(1, 2, SPEC.patch_size) * 100.0 + 50.0
+    valid = t.ones(1, 2, dtype=t.bool)
+
+    # a constant prediction against a standardized target scores its mean square, which
+    # is (n-1)/n because torch's var is unbiased -- the reference standardizes the same way
+    expected = (SPEC.patch_size - 1) / SPEC.patch_size
+    assert abs(model.reconstruction_loss(prediction, target, valid).item() - expected) < 1e-3
+
+    # and scaling one token by 1000 does not change the loss it contributes
+    scaled = target.clone()
+    scaled[:, 0] *= 1000.0
+    assert abs(
+        model.reconstruction_loss(prediction, scaled, valid).item()
+        - model.reconstruction_loss(prediction, target, valid).item()
+    ) < 1e-3
+
+    off = _model(norm_targets=False, loss_channels=(0,))
+    assert off.reconstruction_loss(prediction, scaled, valid) > 1e4
 
 
 def test_the_mask_splits_the_grid_exactly_once():
@@ -86,17 +136,20 @@ def test_the_encoder_never_sees_a_target_token():
 
 
 def test_loss_scores_only_the_channels_it_was_given():
-    model = _model(tau=0.0, loss_channels=(2,))
-    prediction = t.zeros(1, 4, SPEC.token_dim)
-    target = t.zeros(1, 4, SPEC.patch_size, C)
-    target[..., 3] = 100.0                                  # acc: not a loss channel
-    valid = t.ones(1, 4, dtype=t.bool)
+    """The head is as wide as the target, so an unscored channel never reaches the loss."""
 
-    assert model.reconstruction_loss(prediction, target.flatten(-2), valid) == 0.0
+    model = _model(tau=0.0, target="values", loss_channels=(2,), norm_targets=False)
+    assert model.prediction.out_features == SPEC.patch_size
 
-    target[..., 2] = 2.0                                    # vel: is one
-    loss = model.reconstruction_loss(prediction, target.flatten(-2), valid)
-    assert abs(loss.item() - 4.0) < 1e-6
+    x = _features(batch=1)
+    _, target, _, mask = model(x, generator=t.Generator().manual_seed(0))
+    patch, dof = divmod(mask.targets[0, 0].item(), D)
+    lo = patch * SPEC.patch_size
+    assert t.allclose(target[0, 0], x[0, lo : lo + SPEC.patch_size, dof, 2], atol=1e-6)
+
+    prediction = t.zeros(1, 4, SPEC.patch_size)
+    flat = t.full((1, 4, SPEC.patch_size), 2.0)
+    assert abs(model.reconstruction_loss(prediction, flat, t.ones(1, 4, dtype=t.bool)).item() - 4.0) < 1e-6
 
 
 def test_invalid_target_tokens_are_left_out_of_the_loss():

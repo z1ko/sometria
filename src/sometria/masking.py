@@ -147,3 +147,29 @@ def _gumbel(shape: tuple[int, ...], device, generator: t.Generator | None) -> t.
 
     u = t.rand(shape, device=device, generator=generator)
     return -t.log(-t.log(u + EPS) + EPS)
+
+
+def extract_motion(features: t.Tensor, stride: int = 1) -> t.Tensor:
+    """``(B, T, D, C)`` -> the same shape, holding ``x[t + stride] - x[t]``.
+
+    MAMP's ``extract_motion``. The motion is taken over the *whole window* before it is
+    patchified, so a token still carries ``patch_size`` values per channel and the
+    prediction head keeps its shape; the last ``stride`` frames have no successor and are
+    left at zero, exactly as the reference leaves them.
+
+    Differencing here rather than reading the stored ``vel`` channel is deliberate. The
+    stored channel is signed-log compressed and normalized per DOF, which is a different
+    quantity from a plain temporal difference of the input the encoder actually sees --
+    and the compression is what made the velocity target unlearnable.
+    """
+
+    if stride < 1:
+        raise ValueError(f"motion stride must be at least 1, got {stride}")
+    if stride >= features.shape[1]:
+        raise ValueError(
+            f"motion stride {stride} needs a window longer than {features.shape[1]} frames"
+        )
+
+    motion = t.zeros_like(features)
+    motion[:, :-stride] = features[:, stride:] - features[:, :-stride]
+    return motion

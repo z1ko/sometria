@@ -152,9 +152,18 @@ A self-supervised training task over a backbone: what is hidden, what is predict
 loss is. One `LightningModule` per objective under `models/` — masked reconstruction today,
 JEPA later. MAE and MAMP are *not* separate objectives: they are one
 `MaskedMotionAutoencoder` at two configurations, differing in `tau` (uniform vs motion-aware
-masking) and `loss_channels` (pose vs `vel`). MAMP differences raw joint coordinates to get a
-motion target because motion is absent from its input; here `vel` is a stored channel, so the
-target is a channel selection rather than a computation.
+masking) and `target` (reconstruct the input vs predict its temporal difference). Both follow
+the reference in taking the motion target by differencing *the input the encoder sees*
+(`extract_motion`, over the window rather than per patch), and in standardizing every target
+token before the loss (`norm_targets`, the reference's `norm_skes_loss`).
+
+The tempting shortcut — select the stored `vel` channel and call that the difference — was
+tried and does not work. That channel is signed-log compressed and normalized per DOF, so its
+per-frame values are near-unpredictable from context: the objective explained 7.7% of its
+target's variance in 10 epochs where pose reconstruction explained 98.8%, and the backbone it
+produced probed *below* random initialization. Standardizing per token matters for the same
+reason — an unnormalized squared error on motion is carried by the few fastest tokens, which
+motion-aware masking has deliberately selected for.
 _Avoid_: model, task, head
 
 **Label coverage**:

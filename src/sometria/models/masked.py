@@ -7,13 +7,18 @@ hidden, what is predicted, and what the loss is.
 
 MAE and MAMP are not two models. They are this one at two configurations:
 
-- ``tau <= 0``  -- uniform random masking, reconstruction of pose channels: MAE.
-- ``tau > 0``   -- motion-aware masking, loss on ``vel``: MAMP.
+- ``target="values"``, ``tau <= 0``  -- uniform masking, reconstruct the input: MAE.
+- ``target="motion"``, ``tau > 0``   -- motion-aware masking, predict the temporal
+  difference of the input: MAMP.
 
-The reference differences raw joint coordinates to build a motion target because motion
-is absent from its input. Here ``vel`` is a stored channel, so the difference is a
-channel selection (``loss_channels``) rather than a computation -- and differencing the
-normalized, signed-log-compressed values would not reproduce it anyway.
+Both follow the reference (Mao et al., https://github.com/maoyunyao/MAMP) in taking the
+motion target by differencing *the input the encoder sees*, and in normalizing each
+target token to zero mean and unit variance before the loss (``norm_skes_loss`` there,
+``norm_targets`` here). An earlier version selected the stored ``vel`` channel instead,
+on the theory that a stored velocity makes the difference a channel selection rather than
+a computation. It does not: that channel is signed-log compressed and normalized per DOF,
+so its per-frame values are near-unpredictable from context, and the objective explained
+7.7% of its target's variance in 10 epochs while the pose objective explained 98.8%.
 """
 
 import lightning as L
@@ -28,7 +33,15 @@ from sometria.architecture.encoder import (
 )
 from sometria.architecture.pos_embed import PositionalEncoding
 from sometria.architecture.scheduler import lr_schedule
-from sometria.masking import MaskIndices, motion_aware_mask, patchify, token_validity
+from sometria.masking import (
+    MaskIndices,
+    extract_motion,
+    motion_aware_mask,
+    patchify,
+    token_validity,
+)
+
+TARGETS = ("values", "motion")
 
 
 class MaskedMotionAutoencoder(L.LightningModule):
@@ -38,15 +51,20 @@ class MaskedMotionAutoencoder(L.LightningModule):
         self,
         backbone: MotionTransformerEncoder | EncoderSpec | dict | None = None,
         *,
-        decoder_depth: int = 2,
-        mask_ratio: float = 0.80,
-        # The defaults are the MAMP configuration. MAE is tau <= 0 with the pose
-        # channels as its target; both baselines set all three explicitly in their config.
-        tau: float = 0.25,
+        decoder_depth: int = 5,
+        mask_ratio: float = 0.90,
+        # The defaults are the MAMP configuration, at the reference's values. MAE is
+        # target="values" with tau <= 0; both baselines set every knob in their config.
+        tau: float = 0.80,
+        target: str = "motion",
+        motion_stride: int = 1,
         score_channels: tuple[int, ...] = (2,),      # representation.indices("vel")
-        loss_channels: tuple[int, ...] = (2,),       # representation.indices("vel")
+        loss_channels: tuple[int, ...] = (0, 1),     # representation.indices("sin", "cos")
+        norm_targets: bool = True,
         lr: float = 1e-3,
-        warmup_frac: float = 0.03,
+        min_lr_frac: float = 0.5,
+        weight_decay: float = 0.05,
+        warmup_frac: float = 0.05,
     ) -> None:
         super().__init__()
 
@@ -55,6 +73,10 @@ class MaskedMotionAutoencoder(L.LightningModule):
             raise ValueError("mask_ratio must be between 0 and 1 for masked reconstruction.")
         if tau > 0 and not score_channels:
             raise ValueError("motion-aware masking needs at least one score channel.")
+        if target not in TARGETS:
+            raise ValueError(f"target must be one of {TARGETS}, got {target!r}")
+        if not loss_channels:
+            raise ValueError("the loss needs at least one channel to score.")
 
         # The spec, never the module: hparams have to survive a checkpoint round trip, and
         # this is what lets load_from_checkpoint(path) rebuild the backbone unaided.
@@ -64,9 +86,14 @@ class MaskedMotionAutoencoder(L.LightningModule):
                 "decoder_depth": decoder_depth,
                 "mask_ratio": mask_ratio,
                 "tau": tau,
+                "target": target,
+                "motion_stride": motion_stride,
                 "score_channels": tuple(score_channels),
                 "loss_channels": tuple(loss_channels),
+                "norm_targets": norm_targets,
                 "lr": lr,
+                "min_lr_frac": min_lr_frac,
+                "weight_decay": weight_decay,
                 "warmup_frac": warmup_frac,
             }
         )
@@ -75,8 +102,13 @@ class MaskedMotionAutoencoder(L.LightningModule):
         spec = backbone.spec
         self.mask_ratio = mask_ratio
         self.tau = tau
+        self.target = target
+        self.motion_stride = motion_stride
         self.score_channels = tuple(score_channels)
+        self.norm_targets = norm_targets
         self.lr = lr
+        self.min_lr_frac = min_lr_frac
+        self.weight_decay = weight_decay
         self.warmup_frac = warmup_frac
 
         time_patches, num_dofs = spec.grid_shape
@@ -95,11 +127,11 @@ class MaskedMotionAutoencoder(L.LightningModule):
         self.decoder = nn.TransformerEncoder(
             layer, num_layers=decoder_depth, norm=nn.LayerNorm(spec.d_model), enable_nested_tensor=False
         )
-        self.prediction = nn.Linear(spec.d_model, spec.token_dim)
-
-        loss_mask = t.zeros(spec.num_features, dtype=t.bool)
-        loss_mask[list(loss_channels)] = True
-        self.register_buffer("loss_channel_mask", loss_mask)
+        # The head is exactly as wide as the target, as in the reference: predicting
+        # channels no loss scores would be parameters that never receive a gradient.
+        self.loss_channels = tuple(loss_channels)
+        self.register_buffer("loss_channel_index", t.tensor(self.loss_channels, dtype=t.long))
+        self.prediction = nn.Linear(spec.d_model, spec.patch_size * len(self.loss_channels))
 
         nn.init.normal_(self.mask_token, std=0.02)
 
@@ -113,11 +145,20 @@ class MaskedMotionAutoencoder(L.LightningModule):
 
         spec = self.backbone.spec
         patches = self.backbone.time_patches(features.shape[1])
-        # One patchify feeds all three consumers: the mask scores it, the encoder
-        # projects it, and the loss compares against it.
+        # One patchify feeds the mask, which scores it, and the encoder, which projects
+        # it. A motion target needs its own, over a differenced copy of the window.
         tokens_in = patchify(features, spec.patch_size)
         values = tokens_in.flatten(start_dim=-2)
         batch, length, _ = values.shape
+
+        # The encoder always reads the input; only what the decoder is asked for changes.
+        # extract_motion runs on the window, not on the patches, so the difference at a
+        # patch boundary is a real one rather than being zeroed at every 8th frame.
+        target_source = (
+            tokens_in
+            if self.target == "values"
+            else patchify(extract_motion(features, self.motion_stride), spec.patch_size)
+        )
 
         mask = motion_aware_mask(
             tokens_in,
@@ -144,7 +185,8 @@ class MaskedMotionAutoencoder(L.LightningModule):
             if valid is None
             else _gather(token_validity(valid, spec.patch_size, length).to(values.device), mask.targets)
         )
-        return _gather(prediction, mask.targets), _gather(values, mask.targets), target_valid, mask
+        target = target_source[..., self.loss_channel_index].flatten(start_dim=-2)
+        return _gather(prediction, mask.targets), _gather(target, mask.targets), target_valid, mask
 
     def reconstruction_loss(
         self,
@@ -152,16 +194,24 @@ class MaskedMotionAutoencoder(L.LightningModule):
         target: t.Tensor,
         target_valid: t.Tensor,
     ) -> t.Tensor:
-        spec = self.backbone.spec
-        shape = (*prediction.shape[:2], spec.patch_size, spec.num_features)
-        prediction = prediction.reshape(shape)
-        target = target.reshape(shape)
+        """``prediction`` and ``target`` are both ``(B, N, patch_size * len(loss_channels))``."""
 
-        mask = target_valid[:, :, None, None] & self.loss_channel_mask[None, None, None, :]
-        squared_error = (prediction - target).square()
-        if not mask.any():
-            return squared_error.mean() * 0.0
-        return squared_error.masked_select(mask).mean()
+        if self.norm_targets:
+            # MAMP's norm_skes_loss. Each target token is standardized over its own
+            # values, so the loss asks for the *shape* of the patch rather than its
+            # magnitude. Without it a squared error on motion is dominated by the few
+            # fastest tokens -- which motion-aware masking has deliberately selected for.
+            mean = target.mean(dim=-1, keepdim=True)
+            var = target.var(dim=-1, keepdim=True)
+            target = (target - mean) / (var + 1.0e-6) ** 0.5
+
+        if not target_valid.any():
+            return (prediction - target).square().mean() * 0.0
+
+        # Mean per token, then mean over target tokens: a token counts once whatever its
+        # width, which is what makes the number comparable across loss_channels.
+        per_token = (prediction - target).square().mean(dim=-1)
+        return (per_token * target_valid).sum() / target_valid.sum()
 
     def _step(self, batch: dict, stage: str) -> t.Tensor:
         prediction, target, target_valid, mask = self(batch["features"], batch.get("valid"))
@@ -178,7 +228,11 @@ class MaskedMotionAutoencoder(L.LightningModule):
         return self._step(batch, "val")
 
     def configure_optimizers(self): # type: ignore
-        optimizer = t.optim.AdamW(self.parameters(), lr=self.lr)
+        # betas and weight decay follow the reference's AdamW; its cosine decays to
+        # min_lr = lr / 2 rather than to zero, which min_lr_frac carries.
+        optimizer = t.optim.AdamW(
+            self.parameters(), lr=self.lr, betas=(0.9, 0.95), weight_decay=self.weight_decay
+        )
         total_steps = int(self.trainer.estimated_stepping_batches)
         return {
             "optimizer": optimizer,
@@ -187,6 +241,7 @@ class MaskedMotionAutoencoder(L.LightningModule):
                     optimizer,
                     warmup_steps=max(1, int(self.warmup_frac * total_steps)),
                     total_steps=total_steps,
+                    min_factor=self.min_lr_frac,
                 ),
                 "interval": "step",
             },

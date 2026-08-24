@@ -39,7 +39,7 @@ encoder:
 model:
   name: classifier
   checkpoint: runs/mamp/lightning_logs/version_0/checkpoints/epoch=9-step=7240.ckpt       # e.g. runs/mamp/lightning_logs/version_0/checkpoints/last.ckpt
-  pool: window           # -> d_model
+  pool: dof           # -> num_dofs * d_model
   head: linear
   freeze_backbone: true
   lr_head: 0.001
@@ -51,3 +51,4 @@ training:
   limit_train_batches: 1.0
   limit_val_batches: 1.0
   overfit_batches: 0
+

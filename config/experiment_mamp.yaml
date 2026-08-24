@@ -1,5 +1,6 @@
-# MAMP baseline: motion-aware masking, velocity as the target.
-# Its only differences from experiment_mae.yaml are `tau` and `loss_channels`.
+# MAMP baseline, at the reference's hyperparameters
+# (Mao et al., https://github.com/maoyunyao/MAMP, config/ntu60_xsub_joint/pretrain_mamp_*).
+# Its only differences from experiment_mae.yaml are `tau` and `target`.
 
 dataloader:
   root: data/processed
@@ -24,23 +25,29 @@ encoder:
   num_features: 5
   patch_size: 8          # 133 ms at 60 Hz; 240 frames -> 30 x 43 = 1290 tokens
   window_frames: 240
-  d_model: 256
-  depth: 4
-  num_heads: 4
+  d_model: 256           # reference: dim_feat 256
+  depth: 8               # reference: depth 8
+  num_heads: 8           # reference: num_heads 8
   mlp_ratio: 4.0
   dropout: 0.0
 
 model:
   name: masked
-  decoder_depth: 2
-  mask_ratio: 0.80
-  tau: 0.25              # > 0: targets drawn in proportion to |vel|
-  loss_channels: [2]     # vel -- the motion target MAMP differences its input to get
-  lr: 0.001
+  decoder_depth: 5       # reference: decoder_depth 5
+  mask_ratio: 0.90       # reference: mask_ratio 0.9
+  tau: 0.80              # reference: motion_aware_tau 0.80
+  target: motion         # predict x[t+stride] - x[t], as MAMP's extract_motion does
+  motion_stride: 1       # reference: motion_stride 1
+  loss_channels: [0, 1]  # difference the pose channels -- the input's position analogue
+  norm_targets: true     # reference: norm_skes_loss True
+  lr: 0.001              # reference: lr 1e-3
+  min_lr_frac: 0.5       # reference: min_lr 5e-4, i.e. lr / 2
+  weight_decay: 0.05     # reference: weight_decay 0.05
+  warmup_frac: 0.05      # reference: warmup_epochs 20 of 400
 
 training:
   seed: 13
-  epochs: 10
+  epochs: 100            # reference trains 400; this is what fits a working day here
   limit_train_batches: 1.0
   limit_val_batches: 1.0
   overfit_batches: 0
