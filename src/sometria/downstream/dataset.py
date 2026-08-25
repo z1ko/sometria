@@ -25,6 +25,7 @@ from sometria.downstream.labels import (
     annotated_sample_ids,
     load_label_segments,
     window_multi_hot,
+    window_patch_labels,
 )
 from sometria.representation import Representation
 
@@ -62,6 +63,7 @@ class LabelledWindows(t.utils.data.Dataset):
         window_frames: int,
         min_coverage: float = LABEL_MIN_COVERAGE,
         tiles: bool = False,
+        label_patches: int | None = None,
     ) -> None:
         super().__init__()
         self.motions = motions
@@ -69,6 +71,7 @@ class LabelledWindows(t.utils.data.Dataset):
         self.num_labels = num_labels
         self.window_frames = window_frames
         self.min_coverage = min_coverage
+        self.label_patches = label_patches
 
         frames = motions.samples["n_frames"].to_list()
         if tiles:
@@ -101,11 +104,21 @@ class LabelledWindows(t.utils.data.Dataset):
         rows = self.segments.get(item["sample_id"])
         segments = t.zeros(0, 3) if rows is None else t.from_numpy(rows)
 
+        # ``label_patches`` is the whole difference between segmentation and
+        # classification: same windows, same coverage rule, a target resolved in time
+        # rather than collapsed over it.
+        if self.label_patches is None:
+            labels = window_multi_hot(
+                segments, start_t, end_t, self.num_labels, self.min_coverage
+            )
+        else:
+            labels = window_patch_labels(
+                segments, start_t, end_t, self.label_patches, self.num_labels, self.min_coverage
+            )
+
         return {
             "features": features[start : start + self.window_frames],
-            "labels": window_multi_hot(
-                segments, start_t, end_t, self.num_labels, self.min_coverage
-            ),
+            "labels": labels,
             "sample_id": item["sample_id"],
         }
 
@@ -123,6 +136,9 @@ class LabelledMotionDataModule(L.LightningDataModule):
         self.window_frames = loader.get("window_frames", 240)
         self.label_set = loader.label_set
         self.min_coverage = loader.get("label_min_coverage", LABEL_MIN_COVERAGE)
+        # Set for segmentation, absent for classification. It belongs to the loader
+        # rather than the model because it changes the shape of the target.
+        self.label_patches = loader.get("label_patches")
 
         normalization = loader.get("normalization")
         if normalization is None:
@@ -177,6 +193,7 @@ class LabelledMotionDataModule(L.LightningDataModule):
             window_frames=self.window_frames,
             min_coverage=self.min_coverage,
             tiles=tiles,
+            label_patches=self.label_patches,
         )
 
     def _loader(self, dataset: LabelledWindows, shuffle: bool):

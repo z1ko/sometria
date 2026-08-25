@@ -183,3 +183,50 @@ def window_multi_hot_ex(
     coverage = coverage.clamp(max=1.0)
 
     return (coverage >= min_coverage).float()
+
+
+def window_patch_labels(
+    segments: t.Tensor,
+    start_t: float,
+    end_t: float,
+    num_patches: int,
+    num_labels: int,
+    min_coverage: float = LABEL_MIN_COVERAGE,
+) -> t.Tensor:
+    """``(num_patches, num_labels)`` -- :func:`window_multi_hot`, resolved in time.
+
+    The same coverage rule applied to each time patch separately instead of to the window
+    as a whole, so a label marks the patches it actually spans rather than the whole
+    window it touches. This is the target that makes the task temporal: a summary
+    statistic over the window cannot produce it, because the answer differs per patch
+    while the statistic does not.
+
+    ``min_coverage`` means the same thing it does for a window and should usually be
+    higher here: a patch is short, so a segment either covers most of it or misses.
+    """
+
+    target = t.zeros(num_patches, num_labels, dtype=t.float32)
+    duration = end_t - start_t
+    if segments.numel() == 0 or duration <= 0.0 or num_patches <= 0:
+        return target
+
+    # Patch p spans [edges[p], edges[p + 1]).
+    edges = t.linspace(start_t, end_t, num_patches + 1, dtype=t.float64)
+    patch_duration = float(duration) / num_patches
+
+    starts = segments[:, 0].double().unsqueeze(1)            # (n, 1)
+    ends = segments[:, 1].double().unsqueeze(1)
+    overlap = (
+        t.minimum(ends, edges[1:]) - t.maximum(starts, edges[:-1])
+    ).clamp(min=0.0) / patch_duration                        # (n, num_patches)
+
+    labels = segments[:, 2].long()
+    keep = (labels >= 0) & (labels < num_labels) & (overlap > 0.0).any(dim=1)
+    if not keep.any():
+        return target
+
+    # index_add_ over the label axis, so two disjoint segments of one label sum into the
+    # same row rather than the later one replacing the earlier.
+    coverage = t.zeros(num_patches, num_labels, dtype=t.float64)
+    coverage.index_add_(1, labels[keep], overlap[keep].T)
+    return (coverage.clamp(max=1.0) >= min_coverage).float()

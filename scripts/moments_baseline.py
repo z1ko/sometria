@@ -26,6 +26,17 @@ Read the output beside `scripts/results.py runs/<probes> val/macro_map`. The dat
 label set, the head and the metrics are the probe's, so the numbers are comparable; the
 only difference is what enters the head.
 
+Given a config that sets ``dataloader.label_patches`` -- config/experiment_segmentation.yaml
+-- the target is per time patch and two baselines are reported instead of one:
+
+``patch``    moments of each patch's own frames, predicting that patch. Statistics that
+             can vary in time, but see 8 frames and no context. This is the real
+             competitor for a segmentation probe.
+``window``   moments of the whole window, one prediction broadcast to every patch. Zero
+             temporal resolution by construction, so its ``boundary_f1s`` is exactly 0.
+             The floor that says how much of the patch score is available without
+             localizing anything at all.
+
 ``--passes`` collects the training set more than once. Training windows are drawn at a
 random offset per epoch, so a probe sees a fresh crop each time and this, caching once,
 would not. More passes buy back that variety at a linear cost in memory.
@@ -43,6 +54,7 @@ from torchmetrics.classification import MultilabelAveragePrecision, MultilabelF1
 from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
 from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAveragePrecision
+from sometria.downstream.segmentation import boundary_f1
 
 
 #: Names of the moments, in the order :func:`moments` stacks them.
@@ -81,16 +93,43 @@ def moments(features: t.Tensor) -> t.Tensor:
     return stacked.flatten(start_dim=1)
 
 
-@t.no_grad()
-def collect(loader, passes: int = 1) -> tuple[t.Tensor, t.Tensor]:
-    """``(features, labels)`` for a whole loader, moments already taken."""
+def patch_moments(features: t.Tensor, num_patches: int) -> t.Tensor:
+    """``(B, T, D, C)`` -> ``(B, num_patches, D * C * 4)``: :func:`moments` per time patch.
 
-    features, labels = [], []
+    The same four numbers over each patch's own frames rather than over the window. This
+    is what an order-invariant model looks like when it is allowed to vary in time: it
+    can localize, but only from 8 frames at a time and with no context on either side.
+    """
+
+    batch, frames, dofs, channels = features.shape
+    if frames % num_patches:
+        raise ValueError(f"{frames} frames do not divide into {num_patches} patches")
+
+    split = features.reshape(batch, num_patches, frames // num_patches, dofs, channels)
+    stacked = t.stack(
+        [split.mean(dim=2), split.std(dim=2), split.amin(dim=2), split.amax(dim=2)],
+        dim=-1,
+    )
+    return stacked.flatten(start_dim=2)
+
+
+@t.no_grad()
+def collect(loader, passes: int = 1, num_patches: int | None = None) -> tuple[t.Tensor, t.Tensor, t.Tensor]:
+    """``(window moments, patch moments, labels)`` for a whole loader.
+
+    Both feature sets come out of one pass, because collecting the data twice to compute
+    two summaries of it is the expensive half done twice.
+    """
+
+    window, patch, labels = [], [], []
     for _ in range(passes):
         for batch in loader:
-            features.append(moments(batch["features"]))
+            window.append(moments(batch["features"]))
+            if num_patches:
+                patch.append(patch_moments(batch["features"], num_patches))
             labels.append(batch["labels"])
-    return t.cat(features), t.cat(labels)
+
+    return t.cat(window), (t.cat(patch) if patch else t.zeros(0)), t.cat(labels)
 
 
 def train_head(
@@ -139,13 +178,24 @@ def train_head(
 
 
 @t.no_grad()
-def evaluate(head: nn.Module, validation: tuple[t.Tensor, t.Tensor], num_labels: int, device: str) -> dict:
-    """The probe's metric set, so the numbers land in the same units as its own."""
+def evaluate(
+    head: nn.Module,
+    validation: tuple[t.Tensor, t.Tensor],
+    num_labels: int,
+    device: str,
+    *,
+    patches: int | None = None,
+) -> dict:
+    """The probe's metric set, so the numbers land in the same units as its own.
+
+    For a segmentation target the rows are ``(window, patch)`` pairs, which is what
+    :class:`~sometria.downstream.segmentation.MotionSegmenter` scores too -- plus
+    ``boundary_f1s``, which only exists once a prediction can change within a window.
+    """
 
     x, y = validation
     head.eval()
     logits = head(x.to(device)).cpu()
-    target = y.int()
 
     metrics = {
         "val/macro_map": WindowMeanAveragePrecision(num_labels=num_labels),
@@ -155,7 +205,15 @@ def evaluate(head: nn.Module, validation: tuple[t.Tensor, t.Tensor], num_labels:
         "val/top_3_rec": MultilabelTopKRecall(top_k=3),
         "val/top_5_rec": MultilabelTopKRecall(top_k=5),
     }
-    return {name: float(metric(logits, target)) for name, metric in metrics.items()}
+    if patches is None:
+        return {name: float(metric(logits, y.int())) for name, metric in metrics.items()}
+
+    shaped = logits.unflatten(0, (-1, patches))
+    scores = {
+        name: float(metric(logits, y.int())) for name, metric in metrics.items()
+    }
+    scores["val/boundary_f1s"] = float(boundary_f1(shaped, y.unflatten(0, (-1, patches))))
+    return scores
 
 
 def main() -> None:
@@ -187,49 +245,70 @@ def main() -> None:
     data = LabelledMotionDataModule(config)
     data.setup("fit")
 
+    # Set by config/experiment_segmentation.yaml, absent for the classification configs.
+    patches = config.dataloader.get("label_patches")
+
     print(f"collecting moments ({arguments.passes} pass over train, 1 over val)")
-    train = collect(data.train_dataloader(), arguments.passes)
-    validation = collect(data.val_dataloader())
-    print(f"  train {tuple(train[0].shape)}   val {tuple(validation[0].shape)}   {num_labels} labels")
+    train_window, train_patch, train_y = collect(data.train_dataloader(), arguments.passes, patches)
+    val_window, val_patch, val_y = collect(data.val_dataloader(), 1, patches)
+    print(f"  train {tuple(train_window.shape)}   val {tuple(val_window.shape)}   {num_labels} labels")
+
+    if patches:
+        # One row per (window, patch). "patch" reads that patch's own frames; "window"
+        # reads the whole window and predicts the same thing for every patch, so it can
+        # name the action and never say when.
+        variants = {
+            "patch": (
+                train_patch.flatten(end_dim=1), train_y.flatten(end_dim=1),
+                val_patch.flatten(end_dim=1), val_y.flatten(end_dim=1),
+            ),
+            "window": (
+                train_window.repeat_interleave(patches, dim=0), train_y.flatten(end_dim=1),
+                val_window.repeat_interleave(patches, dim=0), val_y.flatten(end_dim=1),
+            ),
+        }
+        print(f"  segmentation: {patches} patches per window, "
+              f"{tuple(variants['patch'][0].shape)} rows")
+    else:
+        variants = {"window": (train_window, train_y, val_window, val_y)}
 
     num_channels = config.encoder.num_features
     results = {}
-    for spec in arguments.channels:
-        channels = (
-            tuple(range(num_channels)) if spec == "all"
-            else tuple(int(c) for c in spec.split(","))
-        )
-        if not all(0 <= c < num_channels for c in channels):
-            raise SystemExit(f"channels {spec} out of range for {num_channels} channels")
+    for variant, (train_x, train_labels, val_x, val_labels) in variants.items():
+        for spec in arguments.channels:
+            channels = (
+                tuple(range(num_channels)) if spec == "all"
+                else tuple(int(c) for c in spec.split(","))
+            )
+            if not all(0 <= c < num_channels for c in channels):
+                raise SystemExit(f"channels {spec} out of range for {num_channels} channels")
 
-        subset = (
-            channel_slice(train[0], channels, num_channels),
-            train[1],
-        )
-        held_out = (
-            channel_slice(validation[0], channels, num_channels),
-            validation[1],
-        )
-        print(f"\nchannels {channels} -- {subset[0].shape[1]} features")
+            subset = (channel_slice(train_x, channels, num_channels), train_labels)
+            held_out = (channel_slice(val_x, channels, num_channels), val_labels)
 
-        # Reseeded per arm so a subset is not also a different initialization.
-        t.manual_seed(arguments.seed)
-        head = train_head(
-            subset,
-            num_labels,
-            epochs=arguments.epochs,
-            batch_size=arguments.batch_size,
-            lr=arguments.lr,
-            device=device,
-        )
-        results[spec] = evaluate(head, held_out, num_labels, device)
+            name = spec if len(variants) == 1 else f"{variant}/{spec}"
+            print(f"\n{name} -- {subset[0].shape[1]} features, {len(subset[0])} rows")
+
+            # Reseeded per arm so a subset is not also a different initialization.
+            t.manual_seed(arguments.seed)
+            head = train_head(
+                subset,
+                num_labels,
+                epochs=arguments.epochs,
+                batch_size=arguments.batch_size,
+                lr=arguments.lr,
+                device=device,
+            )
+            results[name] = evaluate(
+                head, held_out, num_labels, device, patches=patches if patches else None
+            )
 
     print(f"\n=== moments + linear, {arguments.config.name}, {arguments.passes} passes ===")
     metrics = list(next(iter(results.values())))
-    width = max(len(s) for s in results)
-    print(f"  {'channels':<{width}}  " + "  ".join(f"{m.removeprefix('val/'):>9}" for m in metrics))
-    for spec, scores in results.items():
-        print(f"  {spec:<{width}}  " + "  ".join(f"{scores[m]:>9.4f}" for m in metrics))
+    width = max(len(name) for name in results)
+    print(f"  {'arm':<{width}}  " + "  ".join(f"{m.removeprefix('val/'):>11}" for m in metrics))
+    for name, scores in results.items():
+        print(f"  {name:<{width}}  " + "  ".join(f"{scores[m]:>11.4f}" for m in metrics))
 
 
 if __name__ == "__main__":

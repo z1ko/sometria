@@ -1,0 +1,69 @@
+# Action segmentation: the same frozen backbone and the same BABEL labels as the
+# classification probes, with the target resolved per time patch instead of collapsed
+# over the window.
+#
+# It exists because window classification turned out to be weakly discriminative -- a
+# linear model on the mean, std, min and max of each channel reaches 94% of a pretrained
+# probe there (scripts/moments_baseline.py). Those statistics are order-invariant, so
+# they cannot produce a target that varies inside the window: this task can separate a
+# representation that encodes time from one that does not, and that one cannot.
+#
+# Read `val/macro_map` against the moments baseline run with the same label_patches, and
+# `val/boundary_f1s` on its own -- a prediction constant across the window scores zero on
+# it however well it names the action.
+
+dataloader:
+  root: data/processed
+  human: config/human.yaml
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_train_clean.pt
+  batch_size: 32
+  num_workers: 4
+  window_frames: 240
+  label_set: babel_action_60
+  # Higher than the window task's 0.15: a patch is 8 frames, so a segment either covers
+  # most of it or misses it, and a low threshold would smear every label across the
+  # neighbours of the patches it really occupies.
+  label_min_coverage: 0.5
+  # 240 frames / patch_size 8. Setting this is what makes the target temporal.
+  label_patches: 30
+
+  train:
+    split_set: babel_official
+    split: train
+    source_datasets: ["AMASS"]
+
+  val:
+    split_set: babel_official
+    split: val
+    source_datasets: ["AMASS"]
+
+# Only read when `model.checkpoint` is null: a pretrained backbone brings its own spec in
+# the checkpoint's hparams. Keep it matching the pretraining config anyway, or the
+# random-initialization control stops being the same architecture as what it controls for.
+encoder:
+  num_dofs: 43
+  num_features: 5
+  patch_size: 8
+  window_frames: 240
+  d_model: 256
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+model:
+  name: segmenter
+  checkpoint: runs/ablation_long/pretrain/seed_13/lightning_logs/version_0/checkpoints/last.ckpt
+  encoder: backbone    # which submodule of the checkpoint holds the weights
+  # attentive_factorized is rejected here: it pools the time axis this task predicts along.
+  pool: attentive
+  lr: 0.001
+
+training:
+  seed: 13
+  epochs: 20
+  monitor: val/macro_map
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  overfit_batches: 0
+

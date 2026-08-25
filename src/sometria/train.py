@@ -14,6 +14,7 @@ from sometria.dataset import MotionDataModule
 from sometria.downstream.classifier import MotionLinearClassifier
 from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
+from sometria.downstream.segmentation import MotionSegmenter
 from sometria.masking import MaskSpec
 from sometria.models.jepa import MotionJEPA
 from sometria.models.mae import MaskedAutoencoder
@@ -46,7 +47,7 @@ def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]
         mask = None if masking is None else MaskSpec(**OmegaConf.to_container(masking, resolve=True))
         return OBJECTIVES[name](spec, mask, **model_config), MotionDataModule(config)
 
-    if name == "classifier":
+    if name in ("classifier", "segmenter"):
         # The mapping from a probe to what it measures is this path, and nothing else:
         # the pretraining checkpoint carries the spec, so the `encoder:` block below is
         # only read for the random-initialization control.
@@ -62,7 +63,8 @@ def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]
         _, model_config["num_labels"] = load_label_vocabulary_index(
             config.dataloader.root, config.dataloader.label_set
         )
-        return MotionLinearClassifier(backbone, **model_config), LabelledMotionDataModule(config)
+        head = MotionSegmenter if name == "segmenter" else MotionLinearClassifier
+        return head(backbone, **model_config), LabelledMotionDataModule(config)
 
     raise ValueError(f"Unknown model: {name}")
 
