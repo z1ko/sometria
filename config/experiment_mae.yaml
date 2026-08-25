@@ -40,6 +40,11 @@ masking:
 model:
   name: mae
   decoder_depth: 3       # reference MAE: decoder_depth 3
+  # Which channels the head predicts and the loss scores. Not which channels the encoder
+  # reads -- that is always all of them. All five is the baseline every ablation so far
+  # was measured against; `ablate.sh channels` runs [0,1] (sin, cos) and [0,1,4] (+ tau)
+  # against it, because vel and acc are ~72% of the loss and much the hardest to predict.
+  loss_channels: [0, 1, 2, 3, 4]
   norm_targets: true     # reference: norm_skes_loss True
   lr: 0.001              # reference: lr 1e-3
   min_lr_frac: 0.5       # reference: min_lr 5e-4, i.e. lr / 2
