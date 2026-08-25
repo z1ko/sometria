@@ -132,11 +132,20 @@ stage_channels() {
     # top of that is worth +0.007, which is the floor. So the loss does not need the
     # dynamics channels, but it very much needs torque.
     #
-    # tau alone asks how far that goes: if it matches nodyn, torque is not contributing
-    # to this objective, it essentially is the objective.
+    # tau alone came in at 0.1323 -- below pose, so torque is not the objective on its
+    # own. What the arms actually track is how many independent physical quantities the
+    # loss scores: sin and cos are one angle twice, vel and acc are its derivatives, and
+    # tau is the only channel that is not a function of the trajectory. One quantity
+    # scores ~0.14, two score ~0.24.
+    #
+    # But score is also monotone in head width (8, 16, 24, 40 -> 0.132, 0.149, 0.234,
+    # 0.241), so breadth of supervision explains the same numbers. sin_tau separates
+    # them: it is pose's width carrying nodyn's two quantities, so it scores like pose
+    # if width is what matters and like nodyn if independence is.
     pretrain "channels_pose" "model.loss_channels=[0,1]"
     pretrain "channels_nodyn" "model.loss_channels=[0,1,4]"
     pretrain "channels_tau" "model.loss_channels=[4]"
+    pretrain "channels_sin_tau" "model.loss_channels=[0,4]"
 }
 
 stage_probe() {
