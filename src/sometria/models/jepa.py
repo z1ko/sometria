@@ -67,9 +67,9 @@ class MotionJEPA(PretextObjective):
     # patch the decoder has to invent.
     DEFAULT_MASK = MaskSpec(mask_ratio=0.25, tau=0.80, score_channels=(2,))
 
-    # The collapse guard belongs on the bar: a JEPA whose embeddings stop varying drives
+    # The collapse guards belong on the bar: a JEPA whose embeddings stop varying drives
     # its own loss to zero, so val/loss alone cannot say whether training is working.
-    PROG_BAR = ("embed_std",)
+    PROG_BAR = ("embed_std", "loss_over_null")
 
     def __init__(
         self,
@@ -139,6 +139,11 @@ class MotionJEPA(PretextObjective):
     def step(self, batch: dict) -> tuple[t.Tensor, dict[str, t.Tensor | float]]:
         prediction, target, window = self(batch["features"])
         loss = masked_token_mse(prediction, target)
+
+        # What a predictor that ignored its input entirely would score: emit the batch
+        # mean for every window, and the squared error is the targets' own variance.
+        null_loss = target.var(dim=0, unbiased=False).mean()
+
         return loss, {
             "context_tokens": float(window.mask.context.shape[1]),
             # Spread of the teacher's target vectors across the batch. Measured on the
@@ -146,6 +151,12 @@ class MotionJEPA(PretextObjective):
             # loss scores: if these collapse to a constant, the loss reaches zero while
             # the backbone has learned nothing.
             "embed_std": target.std(dim=0, unbiased=False).mean(),
+            # The ratio is the number to read, because both halves fall during collapse
+            # and only their ratio says which is happening. 1.0 means the predictor is
+            # doing exactly as well as emitting the mean -- learning nothing, however
+            # small the loss has become. Below 1 is real prediction; a loss that falls
+            # while this sits at 1 is the teacher collapsing, not the student learning.
+            "loss_over_null": loss / null_loss.clamp(min=1e-8),
         }
 
     def trainable_parameters(self):
