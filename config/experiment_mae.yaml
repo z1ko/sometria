@@ -35,7 +35,7 @@ encoder:
 masking:
   mask_ratio: 0.90       # reference: mask_ratio 0.9
   tau: 0.0               # <= 0: uniform random masking
-  score_channels: [2]    # unread at tau <= 0; representation.indices("vel")
+  score_channels: []     # empty, because tau <= 0 means nothing is ever scored
 
 model:
   name: mae
