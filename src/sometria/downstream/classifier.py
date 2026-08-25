@@ -38,6 +38,7 @@ class MotionLinearClassifier(L.LightningModule):
         backbone: MotionTransformerEncoder,
         num_labels: int,
         pool: str = "attentive_factorized",  # "mean" | "mean_max" | "attentive" | "attentive_factorized"
+        min_lr_frac: float = 0.5,
         lr: float = 1e-3,
         warmup: float = 0.03,
     ) -> None:
@@ -53,6 +54,7 @@ class MotionLinearClassifier(L.LightningModule):
 
         self.pool = pool
         self.warmup = warmup
+        self.min_lr_frac = min_lr_frac
         self.lr = lr
 
         spec = backbone.spec
@@ -132,6 +134,7 @@ class MotionLinearClassifier(L.LightningModule):
                 "scheduler": lr_schedule(
                     optimizer,
                     warmup_steps=max(1, int(self.warmup * total_steps)),
+                    min_factor=self.min_lr_frac,
                     total_steps=total_steps,
                 ),
                 "interval": "step",
