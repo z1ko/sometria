@@ -1,0 +1,186 @@
+% Requires: \usepackage{booktabs} and \usepackage{amsmath}
+% Numbers: attentive-pooling probe, epoch 20.
+% runs/channels/probe_attentive, runs/ablation/probe_attentive.
+
+\subsection{What the reconstruction target must contain}
+\label{sec:ablation-channels}
+
+Our representation gives each degree of freedom five channels per frame: the joint
+angle encoded as $(\sin\theta, \cos\theta)$, its first and second time derivatives
+$(\dot\theta, \ddot\theta)$, and the generalized joint torque $\tau$ recovered by
+inverse dynamics. The masked-reconstruction objective need not predict all of them.
+We therefore ablate the \emph{loss} channels while leaving the \emph{input} untouched:
+the encoder always reads all five channels, and only the decoder head and the
+reconstruction loss are narrowed. Each arm is pretrained identically and evaluated by
+the frozen-backbone linear probe of Section~\ref{sec:probe}.
+
+The comparison is not simply kinematic against dynamic. The equations of motion relate
+the two directly,
+\begin{equation}
+\tau = M(\theta)\,\ddot\theta + C(\theta,\dot\theta) + G(\theta),
+\label{eq:eom}
+\end{equation}
+so acceleration is the kinematic half of the dynamics and a partial proxy for torque.
+Two arms are included specifically to control for this: $\{\sin\theta,\ddot\theta\}$,
+which pits torque against its proxy at matched head width, and
+$\{\sin\theta,\cos\theta,\dot\theta,\ddot\theta\}$, which is every channel a
+kinematics-only method could compute and therefore the setting our objective must beat.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llcccc}
+\toprule
+Loss channels & Content & $d_\text{head}$ & macro mAP & micro mAP & macro F1 \\
+\midrule
+\multicolumn{2}{l}{\emph{chance (label prevalence)}}   & --- & 0.042 & ---   & ---   \\
+\multicolumn{2}{l}{\emph{random frozen encoder}}       & --- & 0.128 & 0.334 & 0.021 \\
+\midrule
+$\tau$                                        & dynamic          &  8 & 0.153 & 0.367 & 0.041 \\
+$\sin\theta,\cos\theta$                       & kinematic        & 16 & 0.180 & 0.392 & 0.036 \\
+$\sin\theta,\ddot\theta$                      & kin.\ + proxy    & 16 & 0.238 & 0.438 & 0.085 \\
+$\sin\theta,\tau$                             & kin.\ + dynamic  & 16 & 0.259 & 0.458 & 0.100 \\
+$\sin\theta,\cos\theta,\tau$                  & kin.\ + dynamic  & 24 & 0.261 & 0.460 & 0.116 \\
+$\sin\theta,\cos\theta,\dot\theta,\ddot\theta$& kinematic only   & 32 & 0.216 & 0.426 & 0.074 \\
+all five                                      & kin.\ + dynamic  & 40 & \textbf{0.297} & \textbf{0.493} & \textbf{0.143} \\
+\bottomrule
+\end{tabular}
+\caption{Linear-probe transfer as a function of which channels the pretext loss scores,
+under attentive pooling. $d_\text{head}$ is the width of the decoder's prediction head,
+i.e.\ the number of values regressed per masked token. The all-five row is the mean of
+two seeds; the seed-to-seed spread is $0.008$ macro mAP, which we take as the noise
+floor. Absolute values depend on the pooling head; the ordering does not
+(Section~\ref{sec:pooling}).}
+\label{tab:channels}
+\end{table}
+
+\paragraph{Neither signal alone transfers well.} Reconstructing the joint angle and
+nothing else reaches $0.180$ macro mAP, recovering $31\%$ of the gap between the random
+encoder and the full objective; torque alone recovers $15\%$. Both fall far short in
+isolation.
+
+\paragraph{Together they exceed the sum of their parts.} Adding $\tau$ to the angle
+raises macro mAP from $0.180$ to $0.259$ and macro F1 from $0.036$ to $0.100$, ten times
+the seed noise floor. Separately the two account for $31\%$ and $15\%$ of the macro mAP
+gap; jointly for $78\%$. On macro F1 the effect is starker still, $12\%$ and $17\%$
+separately against $65\%$ together, and it holds on every metric we track. Kinematics
+and dynamics are therefore complementary rather than redundant, and their
+complementarity is most pronounced on the rare classes that macro-averaged metrics
+weight equally --- consistent with the observation that the same joint trajectory
+executed under different loads constitutes a different action, a distinction invisible
+to a purely kinematic target.
+
+\paragraph{Kinematics alone saturates well below the full objective.} The strongest
+purely kinematic arm, scoring the angle together with both its derivatives, reaches
+$0.216$ --- only $53\%$ of the gap, despite a $32$-dimensional head. This is the arm
+that corresponds to what a method without inverse dynamics can supervise, and it is
+beaten by $\{\sin\theta,\tau\}$, which reaches $0.259$ with half the head width and a
+quarter of the channels. Access to torque is thus not a marginal refinement of a
+kinematic objective; it is worth more than every derivative of the trajectory combined.
+
+\paragraph{Acceleration proxies torque, but does not replace it.} Equation~\ref{eq:eom}
+predicts that $\ddot\theta$ should carry part of the dynamic signal, and it does:
+$\{\sin\theta,\ddot\theta\}$ reaches $0.238$ against the angle-only $0.180$, recovering
+about $70\%$ of what torque contributes at the same head width. The remaining gap to
+$\{\sin\theta,\tau\}$ is $0.021$, or $2.7$ times the noise floor. Acceleration is
+therefore a genuine but incomplete substitute, which is what the mass, Coriolis and
+gravitational terms of Equation~\ref{eq:eom} would lead one to expect: recovering $\tau$
+from $\ddot\theta$ alone requires the configuration-dependent inertia and gravity terms
+that the kinematic channels do not carry.
+
+\paragraph{Torque contributes a constant increment.} Its effect is close to additive and
+independent of which kinematic channels accompany it:
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Base & \ \ without $\tau$\ \  & \ \ with $\tau$\ \  \\
+\midrule
+$\sin\theta$                                   & 0.180 & 0.259 \ \ ($+0.079$) \\
+$\sin\theta,\cos\theta,\dot\theta,\ddot\theta$ & 0.216 & 0.297 \ \ ($+0.080$) \\
+\bottomrule
+\end{tabular}
+\end{center}
+Adding torque is worth $+0.08$ macro mAP whether the loss already scores one kinematic
+channel or four. The derivatives behave in the complementary way: they are worth
+$+0.058$ when added to the angle alone but only $+0.035$ once torque is present, the
+overlap Equation~\ref{eq:eom} implies.
+
+\paragraph{The effect is not explained by supervision breadth.} Transfer is broadly
+monotone in head width among the kinematic arms, so a wider prediction target is a
+plausible competing account. The dynamic arms refute it directly: the widest kinematic
+arm ($32$ dimensions, $0.216$) is beaten by the narrowest arm containing torque ($16$
+dimensions, $0.259$), and $\{\sin\theta,\tau\}$ matches the $24$-dimensional
+$\{\sin\theta,\cos\theta,\tau\}$ to within the noise floor. What governs transfer is
+which physical quantities the loss scores, not how many values it regresses.
+
+We note three limitations. Each ablated arm is a single seed, with the noise floor
+estimated from the two seeds of the full objective. All arms are pretrained for 10
+epochs, at which point the reconstruction loss is still decreasing, so these are lower
+bounds rather than converged values. Finally, the absolute values are specific to the
+attentive readout: a mean-pooled probe compresses the same ordering into a narrower
+range and roughly triples the seed-to-seed variance.
+
+\subsection{Reading a frozen representation}
+\label{sec:pooling}
+
+A linear probe must first reduce the encoder's $T \times D$ token grid to one vector.
+This choice is usually treated as an implementation detail; we find it dominates the
+measured quality of the representation, and that the conventional default is the worst
+of the options we tried.
+
+We compare four readouts over the same frozen backbones, all trained for the same
+number of epochs with the same optimizer. \textsc{mean} averages over all $T \cdot D$
+tokens. \textsc{mean-max} concatenates the mean with a coordinate-wise maximum,
+doubling the readout width without learning anything. \textsc{attentive} scores each
+token with a two-layer network and takes a softmax-weighted average. \textsc{factorized}
+applies one such scorer across degrees of freedom within each time patch and a second
+across time, on the grounds that a token's two coordinates mean different things and a
+flat attention has to learn that.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lrcccc}
+\toprule
+Readout & Params & macro mAP & micro mAP & macro F1 & seed spread \\
+\midrule
+\textsc{mean}        & 15\,420 & 0.289 & 0.501 & 0.131 & 0.024 \\
+\textsc{mean-max}    & 30\,780 & 0.260 & 0.458 & 0.057 & 0.011 \\
+\textsc{attentive}   & 48\,444 & \textbf{0.341} & 0.529 & 0.196 & 0.002 \\
+\textsc{factorized}  & 81\,468 & 0.338 & \textbf{0.529} & \textbf{0.204} & 0.001 \\
+\bottomrule
+\end{tabular}
+\caption{Probe readouts over identical frozen backbones (all-channel objective, 40
+pretraining epochs, two seeds). ``Params'' counts every trainable parameter, pooler and
+classifier together. ``Seed spread'' is the absolute macro mAP difference between the
+two seeds.}
+\label{tab:pooling}
+\end{table}
+
+\paragraph{The gain is not readout capacity.} \textsc{mean-max} has twice the trainable
+parameters of \textsc{mean} and performs worse on every metric, losing more than half of
+macro F1 ($0.131 \rightarrow 0.057$). Capacity added along the wrong axis is actively
+harmful, so the improvement from attention cannot be attributed to parameter count
+alone. \textsc{attentive} improves on \textsc{mean} by $0.052$ macro mAP and $0.065$
+macro F1, a relative gain of $49\%$ on the latter.
+
+\paragraph{Factorization is unnecessary.} \textsc{factorized} costs $68\%$ more
+parameters than \textsc{attentive} and matches it to within $0.004$ macro mAP, which is
+inside the seed spread of either. Attention over the flat grid already recovers whatever
+structure the separate spatial and temporal scorers were meant to supply, so we adopt
+\textsc{attentive} throughout.
+
+\paragraph{Mean pooling is also unstable.} The two seeds differ by $0.024$ macro mAP
+under \textsc{mean} and by $0.002$ under \textsc{attentive}, an order of magnitude. Much
+of what would otherwise be reported as run-to-run variance of the pretraining is in fact
+variance of the readout. Ablations measured through a mean-pooled probe therefore carry
+a noise floor roughly ten times larger than necessary, which matters whenever the effect
+under test is comparable in size.
+
+We read this as a statement about what averaging discards. A mean over the whole window
+weights every token equally, including the majority that belong to no labelled action;
+the localized, short-duration evidence that distinguishes rare classes is diluted in
+proportion to window length. That the deficit appears most strongly in macro F1, which
+weights rare and frequent classes equally, is consistent with this account. It also
+implies that linear-probe numbers are not comparable across papers unless the readout is
+specified.
