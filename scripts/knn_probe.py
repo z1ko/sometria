@@ -72,7 +72,7 @@ def encoder_features(backbone: MotionTransformerEncoder, device: str):
     return encode
 
 
-def source_features(name: str, config, device: str):
+def source_features(name: str, config, device: str, encoder: str = "backbone"):
     """``(encode, label)`` for one ``--sources`` entry."""
 
     if name == "moments":
@@ -90,10 +90,11 @@ def source_features(name: str, config, device: str):
     parts = checkpoint.resolve().parts
     run = parts[parts.index("lightning_logs") - 1] if "lightning_logs" in parts else checkpoint.stem
 
-    # "backbone" rather than "teacher": both resolve to the same weights for a masked
-    # objective, and this way a JEPA checkpoint fails loudly instead of silently scoring
-    # its teacher when the caller meant something else.
-    return encoder_features(load_encoder(str(checkpoint), "backbone"), device), run
+    # Defaults to "backbone", which is what a masked objective stores. A JEPA checkpoint
+    # holds "student." and "teacher." instead and has no backbone at all, so it needs
+    # --encoder teacher rather than a silent fallback to whichever prefix happens to
+    # match: which of the two is the representation is the caller's decision.
+    return encoder_features(load_encoder(str(checkpoint), encoder), device), run
 
 
 @t.no_grad()
@@ -203,6 +204,12 @@ def main() -> None:
         metavar="SRC",
         help='"moments", "random", or a pretraining checkpoint path',
     )
+    parser.add_argument(
+        "--encoder",
+        default="backbone",
+        choices=("backbone", "teacher", "student"),
+        help="which submodule of a checkpoint holds the weights (JEPA: teacher)",
+    )
     parser.add_argument("--passes", type=int, default=1, help="times to collect the training set")
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--self-check", action="store_true", help="run the self-check and exit")
@@ -232,13 +239,19 @@ def main() -> None:
     for name in arguments.sources:
         # Rebuilt per source rather than collected once: the encoders disagree about what
         # a feature is, and only the loader is shared.
-        encode, label = source_features(name, config, device)
+        encode, label = source_features(name, config, device, arguments.encoder)
         print(f"\ncollecting {label} ({arguments.passes} pass over train, 1 over val)")
 
         t.manual_seed(arguments.seed)   # so "random" is one fixed control, not a lottery
         train_x, train_y = collect(data.train_dataloader(), encode, arguments.passes)
         val_x, val_y = collect(data.val_dataloader(), encode, 1)
         print(f"  train {tuple(train_x.shape)}   val {tuple(val_x.shape)}   {num_labels} labels")
+
+        # Two runs can share a directory name -- ablation/seed_13 and
+        # ablation_long/seed_13 both label as "seed_13" -- and a colliding key would
+        # silently drop the earlier source's rows rather than showing both.
+        if any(existing.startswith(f"{label} k=") for existing in results):
+            label = f"{label}#{sum(1 for e in results if ' k=' in e) // len(NEIGHBOURS)}"
 
         train_x, val_x = standardize(train_x, val_x)
         for k, prediction in knn_predict(train_x, train_y, val_x, NEIGHBOURS, device).items():
