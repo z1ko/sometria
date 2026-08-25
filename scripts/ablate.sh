@@ -151,6 +151,17 @@ stage_channels() {
     pretrain "channels_nodyn" "model.loss_channels=[0,1,4]"
     pretrain "channels_tau" "model.loss_channels=[4]"
     pretrain "channels_sin_tau" "model.loss_channels=[0,4]"
+
+    # The equations of motion make torque roughly M(q)qdd + C(q,qd) + G(q), so
+    # acceleration is the kinematic half of the dynamics and a partial proxy for tau.
+    # Both arms below exist because of that.
+    #
+    # kin_all is every channel a mocap-only method could compute: if it matches all five,
+    # torque contributes nothing that acceleration does not already supply, and the
+    # complementarity result does not hold. sin_acc is the matched-width head-to-head,
+    # tau against its proxy, both paired with the angle -- read it against sin_tau.
+    pretrain "channels_kin_all" "model.loss_channels=[0,1,2,3]"
+    pretrain "channels_sin_acc" "model.loss_channels=[0,3]"
 }
 
 stage_probe() {
