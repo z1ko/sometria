@@ -91,6 +91,7 @@ def train(config: DictConfig, output: Path):
         precision=config.training.get("precision", "bf16-mixed"),
         max_epochs=config.training.epochs,
         default_root_dir=output,
+        check_val_every_n_epoch=5,
         log_every_n_steps=1,
         limit_train_batches=config.training.get("limit_train_batches", None),
         limit_val_batches=config.training.get("limit_val_batches", None),
