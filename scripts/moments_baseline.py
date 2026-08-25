@@ -54,7 +54,7 @@ from torchmetrics.classification import MultilabelAveragePrecision, MultilabelF1
 from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
 from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAveragePrecision
-from sometria.downstream.segmentation import boundary_f1
+from sometria.downstream.segmentation import best_boundary_f1, boundary_f1
 
 
 #: Names of the moments, in the order :func:`moments` stacks them.
@@ -212,7 +212,9 @@ def evaluate(
     scores = {
         name: float(metric(logits, y.int())) for name, metric in metrics.items()
     }
-    scores["val/boundary_f1s"] = float(boundary_f1(shaped, y.unflatten(0, (-1, patches))))
+    shaped_y = y.unflatten(0, (-1, patches))
+    scores["val/boundary_f1s"] = float(boundary_f1(shaped, shaped_y))
+    scores["val/boundary_best_f1s"] = float(best_boundary_f1(shaped, shaped_y))
     return scores
 
 
