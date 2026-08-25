@@ -4,6 +4,7 @@ import argparse
 
 from omegaconf import OmegaConf, DictConfig
 
+import torch as t
 import lightning as L
 
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -72,12 +73,22 @@ def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]
 def train(config: DictConfig, output: Path):
     output = Path(output)
 
+    # TF32 on the tensor cores. Ada defaults to "highest", which is plain fp32 matmul --
+    # roughly half the throughput for a difference this model cannot see: the loss is an
+    # MSE over normalized tokens, not an ill-conditioned solve.
+    t.set_float32_matmul_precision("high")
+
     L.seed_everything(config.training.seed, workers=True)
     model, datamodule = build(config)
     monitor = config.training.get("monitor", "val/loss")
 
     trainer = L.Trainer(
         accelerator="auto",
+        # bf16 is 4.3x, and almost none of it is the matmuls -- TF32 alone was 5%. At
+        # 1290 tokens the cost is attention, and nn.TransformerEncoderLayer only reaches
+        # the flash kernel in a half precision. Master weights stay fp32, so the EMA and
+        # the optimizer are unaffected. Set training.precision=32 to fall back.
+        precision=config.training.get("precision", "bf16-mixed"),
         max_epochs=config.training.epochs,
         default_root_dir=output,
         log_every_n_steps=1,
