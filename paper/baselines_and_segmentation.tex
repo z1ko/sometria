@@ -1,0 +1,194 @@
+% Requires: \usepackage{booktabs} and \usepackage{amsmath}
+% Every number is extracted from a stored run; see paper/data/PROVENANCE.md.
+
+\subsection{What a probe score is worth}
+\label{sec:baselines}
+
+A frozen-backbone probe is usually reported against one control: the same architecture
+with random weights. That control establishes that pretraining does something, and
+nothing else. In particular it cannot say whether the downstream task was hard enough to
+need a representation at all.
+
+We therefore add a second baseline that has no representation and no random weights
+either. For each window we compute four moments --- mean, standard deviation, minimum
+and maximum --- of every degree of freedom and every channel, giving
+$43 \times 5 \times 4 = 860$ numbers per window, and feed them to the same multilabel
+linear head the probe uses. The data, the label set, the optimizer and the metrics are
+the probe's; the only thing that changes is what enters the head.
+
+The two baselines answer different questions, and only together do they bound the
+result. The random encoder says how much of the score is attributable to pretraining.
+The moments say how much of the score was available without learning anything.
+
+\paragraph{The readout budget is a confound, and it is not a small one.}
+Probe hyperparameters are conventionally chosen once and reported as an implementation
+detail. They are not neutral. Table~\ref{tab:budget} evaluates identical frozen
+backbones under two readout budgets: the conventional one ($\text{lr}=10^{-3}$, $20$
+epochs) and a stronger one ($\text{lr}=5\times10^{-3}$, $40$ epochs).
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+& \multicolumn{2}{c}{macro mAP} & \\
+\cmidrule(lr){2-3}
+Input to the head & weak readout & strong readout & $\Delta$ \\
+\midrule
+pretrained encoder (40 ep) & 0.351 & \textbf{0.375} & $+0.024$ \\
+moments (no encoder)       & 0.328 & 0.327 & $-0.002$ \\
+random encoder             & 0.128 & 0.190 & $+0.062$ \\
+\midrule
+pretrained / random        & 2.75  & 1.97  & \\
+pretrained / moments       & 1.07  & 1.15  & \\
+\bottomrule
+\end{tabular}
+\caption{Window classification on BABEL-60 under two probe budgets. Weak readout is
+$\text{lr}=10^{-3}$ for $20$ epochs, strong is $\text{lr}=5\times10^{-3}$ for $40$.
+The backbone is identical across every row of a column; only the head differs. The
+pretrained row is one seed under the strong readout and the mean of two ($0.351$,
+$0.350$) under the weak one.}
+\label{tab:budget}
+\end{table}
+
+The random encoder gains $+0.062$ macro mAP from the stronger head --- a $49\%$ relative
+improvement obtained without touching the representation. The pretrained encoder gains
+$+0.024$ and the moments gain nothing at all. The consequence is that the advantage of
+pretraining over the random control, the number this literature normally reports, falls
+from $2.75\times$ to $1.97\times$ purely as a function of how the probe was tuned.
+
+This is not a statement about our backbone. It is a statement about the measurement: an
+attentive readout over a $T \times D$ token grid can extract substantially more from an
+untrained encoder than a weakly-tuned one can, so a probe ratio is only interpretable
+alongside the budget that produced it. The moments baseline is invariant to this,
+because a fixed $860$-vector into a linear layer has no pooling to learn, which is
+precisely what makes it the more stable reference of the two.
+
+\paragraph{Window classification does not separate the hypotheses.}
+Under either budget the pretrained encoder beats four summary statistics by between
+$7\%$ and $15\%$ macro mAP. A gap that small, on a task where a representation is meant
+to be doing the work, indicates that most of what BABEL-60 window classification
+rewards is available from the marginal distribution of each channel over the window ---
+crudely, how fast and how far each joint moved, without regard to when. We do not read
+this as evidence that the representation is poor. We read it as evidence that the task
+is weakly discriminative, and we therefore turn to one that is not.
+
+\subsection{Dense prediction separates what from when}
+\label{sec:segmentation}
+
+Window classification collapses the time axis before the label is applied. We therefore
+evaluate the same frozen backbones on per-patch prediction: each $240$-frame window is
+divided into $30$ patches and every patch receives its own multilabel target.
+
+Two properties make this the sharper test. First, a representation that has learned only
+window-level statistics cannot express a target that varies within the window. Second,
+the moments baseline splits into two arms that bracket the task. The \textsc{patch} arm
+computes moments of each patch's own $8$ frames and predicts that patch, so it has
+temporal resolution but no context. The \textsc{window} arm computes moments of the
+whole window and broadcasts one prediction to all $30$ patches, so it has context and no
+temporal resolution whatsoever.
+
+We report two localization metrics alongside the per-patch classification. A boundary is
+a patch index where the target changes; $\text{F1}_\partial$ scores boundary detection at
+a fixed threshold, and $\text{F1}_\partial^{\text{sweep}}$ takes the best of $30$
+thresholds swept on the validation set.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Input to the head & macro mAP & macro F1 & $\text{F1}_\partial$ & $\text{F1}_\partial^{\text{sweep}}$ \\
+\midrule
+pretrained encoder (40 ep) & \textbf{0.292} & \textbf{0.228} & \textbf{0.140} & 0.206 \\
+random encoder             & 0.108 & 0.039 & 0.122 & 0.188 \\
+\midrule
+pretrained / random        & 2.70  & 5.90  & 1.15  & 1.10  \\
+\bottomrule
+\end{tabular}
+\caption{Per-patch prediction on BABEL-60, strong readout
+($\text{lr}=5\times10^{-3}$, $40$ epochs), frame-level annotations only. The backbone is
+byte-identical to the one in Table~\ref{tab:budget}. Moments arms and chance levels are
+given in Table~\ref{tab:segfloors}.}
+\label{tab:segmentation}
+\end{table}
+
+\paragraph{Pretraining helps most where the label varies in time.}
+On per-patch macro mAP the pretrained encoder reaches $0.292$ against the random
+encoder's $0.108$, a factor of $2.70$. The corresponding factor on window classification
+under the same readout budget is $1.97$. On macro F1 the separation is starker still,
+$0.228$ against $0.039$.
+
+Crucially this survives the control that eroded the window-classification result. Moving
+from the weak to the strong readout, the segmentation ratio falls only from $3.42$ to
+$2.70$, while the window-classification ratio falls from $2.75$ to $1.97$; in absolute
+terms the pretrained encoder gains $+0.061$ macro mAP from the stronger head against the
+random encoder's $+0.041$. Additional readout capacity is worth more on top of a
+pretrained representation than on top of an untrained one --- the opposite of what we
+observe when the target is a single label for the whole window.
+
+\paragraph{Boundary localization does not benefit.}
+The same table shows no such effect on either localization metric: $1.15\times$ on
+$\text{F1}_\partial$ and $1.10\times$ on the swept variant. Whatever the pretext task
+teaches, it improves the model's account of \emph{which} actions a window contains far
+more than its account of \emph{where} they begin and end.
+
+The moments make the point sharper. Their \textsc{patch} arm reaches $0.132$
+$\text{F1}_\partial$ against the pretrained encoder's $0.140$ --- a gap of $6\%$, where the
+same comparison on per-patch macro mAP is $0.195$ against $0.292$, a gap of $50\%$. Eight
+frames of summary statistics, with no context and no learned representation, localize
+action boundaries almost as well as a pretrained transformer does. Boundary detection on
+this data is very nearly solved by local signal energy.
+
+The swept metric deserves particular scepticism. A random encoder reaches $0.188$ under
+it, and randomly generated per-patch scores with no temporal structure at all reach
+0.148 when swept identically. Nearly the entire observed spread is threshold
+fitting rather than localization. We report $\text{F1}_\partial$ at a fixed threshold as
+the honest column and retain the swept variant only to make this point.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Reference & macro mAP & $\text{F1}_\partial$ & $\text{F1}_\partial^{\text{sweep}}$ \\
+\midrule
+moments, \textsc{patch} arm    & 0.195 & 0.132 & 0.155 \\
+moments, \textsc{window} arm   & 0.182 & 0.000 & 0.000 \\
+\midrule
+boundary base rate             & --- & 0.080 & --- \\
+random scores, swept           & --- & --- & 0.148 \\
+count-matched, shuffled in time& --- & 0.122 & --- \\
+\bottomrule
+\end{tabular}
+\caption{Baselines and chance levels for per-patch prediction. The \textsc{window} arm
+scores exactly zero on both boundary metrics by construction: one prediction broadcast
+to every patch can never produce a change between adjacent patches. Chance levels are
+computed on the same validation windows.}
+\label{tab:segfloors}
+\end{table}
+
+That the \textsc{window} moments arm scores exactly $0.000$ on both boundary metrics is
+worth stating plainly: it confirms the metrics measure what they claim to, since a
+predictor with no temporal resolution is assigned no localization credit whatsoever.
+
+\paragraph{On the annotations.}
+BABEL supplies both frame-level and sequence-level action labels. Sequence-level spans
+cover $0$ to the full duration exactly, so they are constant across every window they
+touch and can never produce a boundary. Retaining them left $42\%$ of segmentation
+windows with a target constant in time and $40\%$ of samples contributing gradient to
+\emph{what} and none to \emph{when}. All segmentation results use frame-level
+annotations only, with sequence-only samples dropped rather than retained as
+all-negative windows; this raises the boundary rate from $0.052$ to $0.080$ at the cost
+of $26\%$ of the windows.
+
+\paragraph{Limitations.}
+Each arm here is a single seed. Under the weak readout, where we have two seeds of the
+pretrained backbone, the seed spread on window classification is $0.001$ macro mAP with
+attentive pooling, which we take as the noise floor; we have not established the
+corresponding floor for the strong readout or for segmentation. The random encoder had
+not converged at the end of training on either segmentation arm, so the ratios reported
+against it are upper bounds. Finally, the pretrained backbone reaches its best
+$\text{F1}_\partial^{\text{sweep}}$ at epoch $4$ and its best macro mAP at epoch $39$:
+the two objectives trade off against each other during probe training, and a single
+checkpoint cannot be optimal for both.
