@@ -142,17 +142,22 @@ def motion_aware_mask(
     owned by :class:`~sometria.representation.Representation`.
 
     Each token scores as the mean absolute value of those channels over its frames. The
-    scores become a distribution through ``softmax(score / (max * tau))`` and are drawn
-    without replacement by Gumbel top-k, with the *highest*-scoring tokens becoming
-    targets. ``tau`` interpolates the whole range: small sharpens toward a deterministic
-    top-k, large flattens toward uniform, and ``tau <= 0`` skips scoring altogether and
-    masks uniformly at random -- the ablation baseline, same function, no second path.
+    scores are standardized per window and divided by ``tau``, then drawn without
+    replacement by Gumbel top-k, with the *highest*-scoring tokens becoming targets.
+    ``tau`` interpolates the whole range: small sharpens toward a deterministic top-k,
+    large flattens toward uniform, and ``tau <= 0`` skips scoring altogether and masks
+    uniformly at random -- the ablation baseline, same function, no second path.
 
-    Note that scores are max-normalized, so the logit spread is capped at ``1 / tau``
-    regardless of how extreme the underlying motion is. At the default ``tau = 0.75``
-    that is ~1.33, close to one standard deviation of Gumbel noise, which makes the
-    default a mild preference rather than a hard selection. Lower ``tau`` if you want it
-    to bite.
+    Standardized, not max-normalized, and the difference is the whole strategy. A max
+    normalization divides skewed non-negative scores by their largest value, which leaves
+    most tokens bunched near zero: measured on this data at ``tau = 0.80`` the logits had
+    a standard deviation of 0.20 against Gumbel noise's 1.28, so motion moved the
+    selection by about a seventh of the noise and the masking was uniform in all but
+    name. Standardizing makes the spread exactly ``1 / tau`` whatever the data does,
+    which is what ``tau`` was always supposed to mean.
+
+    Because of that, ``tau`` values do not carry over from before this change: the old
+    0.80 behaved like a much larger number does now.
 
     Every token is real: a **Window** is a crop of a motion long enough to fill it, never
     a padded short one. ``MotionViewSpec.min_frames`` enforces that on every split.
@@ -166,7 +171,8 @@ def motion_aware_mask(
 
     if tau > 0:
         score = patches[..., list(score_channels)].abs().mean(dim=(-2, -1))          # (B, L)
-        logits = score / (score.amax(dim=-1, keepdim=True) * tau + EPS)
+        centered = score - score.mean(dim=-1, keepdim=True)
+        logits = centered / (score.std(dim=-1, unbiased=False, keepdim=True) + EPS) / tau
         # Gumbel top-k: perturbing log-probabilities by Gumbel noise and sorting draws
         # without replacement from the softmax. log_softmax rather than log(softmax) so
         # a sharp tau cannot underflow.
