@@ -92,8 +92,16 @@ def train(config: DictConfig, output: Path):
                 # "map" silently made mode="min" for f1 monitors and saved the worst epoch.
                 mode="min" if monitor.endswith("loss") else "max",
                 save_top_k=1,
-                save_last=True,
+                save_last=False,
             ),
+            # last.ckpt is a *separate* callback on purpose. Lightning >=2.5 only writes
+            # it when top-k saved on the same step, so a monitored callback that owns both
+            # freezes last.ckpt at the last epoch the monitor improved. That is wrong for
+            # any run whose monitor is not the quality signal -- JEPA drives val/loss to
+            # zero by collapsing, so the epochs worth probing are exactly the ones after
+            # it stops improving. Unmonitored, this one saves every epoch and last.ckpt is
+            # the final weights, as the name says.
+            ModelCheckpoint(save_top_k=1, save_last=True, filename="latest"),
         ],
         logger=CSVLogger(
             save_dir=output,
