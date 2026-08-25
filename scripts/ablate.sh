@@ -22,8 +22,10 @@
 #   RUNS=runs/other ./scripts/ablate.sh    somewhere else
 #   PYTHON=python ./scripts/ablate.sh      bypass uv
 #
-#   CONFIG_PROBE=config/experiment_linear_probe_attentive.yaml PROBE_TAG=_attentive \
-#     EPOCHS=10 ./scripts/ablate.sh probe    the same backbones under a different head
+#   PROBE_ARGS=model.pool=attentive PROBE_TAG=_attentive EPOCHS=20 \
+#     ./scripts/ablate.sh probe             the same backbones under a different head;
+#                                           pool is mean | mean_max | attentive |
+#                                           attentive_factorized
 
 set -euo pipefail
 
@@ -48,6 +50,9 @@ METRIC=${METRIC:-val/macro_map}
 # Probes of the same backbones under a different head go in a sibling directory, so both
 # survive in one tree and stage_report reads them side by side.
 PROBE_TAG=${PROBE_TAG:-}
+# Extra dotlist overrides for the probe only, e.g. PROBE_ARGS="model.pool=attentive".
+# The pretraining runs are untouched, so a head sweep reuses backbones already trained.
+PROBE_ARGS=${PROBE_ARGS:-}
 EPOCHS=${EPOCHS:-}
 DRY=${DRY:-}
 
@@ -94,7 +99,7 @@ probe() { # name, checkpoint path or the string null
 
     echo "probe     $name"
     run "${PYTHON[@]}" -m sometria.train --config "$CONFIG_PROBE" --output "$out" \
-        $(epochs_override) "model.checkpoint=$ckpt"
+        $(epochs_override) "model.checkpoint=$ckpt" $PROBE_ARGS
 }
 
 stage_noise() {
