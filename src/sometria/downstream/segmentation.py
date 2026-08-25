@@ -142,7 +142,7 @@ class MotionSegmenter(L.LightningModule):
         # Both: the fixed one is comparable to anything else logged at 0.5, the swept one
         # is the number that means something.
         self.log("val/boundary_f1s", boundary_f1(logits, batch["labels"]), on_epoch=True, batch_size=logits.shape[0])
-        self.log("val/boundary_best_f1s", best_boundary_f1(logits, batch["labels"]), on_epoch=True, batch_size=logits.shape[0])
+        self.log("val/boundary_best_f1s", best_boundary_f1(logits, batch["labels"]), prog_bar=True, on_epoch=True, batch_size=logits.shape[0])
         return loss
 
     def configure_optimizers(self):  # type: ignore
