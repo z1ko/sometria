@@ -127,11 +127,16 @@ stage_decoder() {
 }
 
 stage_channels() {
-    # acc reaches only 0.65 in forty epochs where sin reaches 0.06, and vel+acc are ~72%
-    # of the total loss: most of the gradient is spent on what cannot be predicted. This
-    # asks whether dropping them from the loss -- not from the input -- helps the probe.
+    # Measured at 10 epochs: pose 0.1488, nodyn 0.2343, all five 0.2410. Adding tau to
+    # pose is worth +0.086 -- thirteen times the seed floor -- and adding vel and acc on
+    # top of that is worth +0.007, which is the floor. So the loss does not need the
+    # dynamics channels, but it very much needs torque.
+    #
+    # tau alone asks how far that goes: if it matches nodyn, torque is not contributing
+    # to this objective, it essentially is the objective.
     pretrain "channels_pose" "model.loss_channels=[0,1]"
     pretrain "channels_nodyn" "model.loss_channels=[0,1,4]"
+    pretrain "channels_tau" "model.loss_channels=[4]"
 }
 
 stage_probe() {
