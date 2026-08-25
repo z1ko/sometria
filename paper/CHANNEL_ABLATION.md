@@ -100,3 +100,22 @@ Benchmarking linear probe token aggregation methods over identical frozen backbo
 
 * **Main Finding:** Masked reconstruction of torque ($	au$) provides a clean, additive $+0.08$ mAP gain over pure kinematics by forcing the encoder to represent configuration-dependent dynamic loads ($M, G$).
 * **Methodological Guidance:** Always use `ATTENTIVE` linear readouts for representation evaluation. Standard mean pooling introduces severe noise that masks subtle algorithmic gains.
+
+## 6. PROBLEMS: A statistical baseline beats us...
+
+Three findings, in order of how much they matter.
+
+1. The benchmark barely discriminates. Mean/std/min/max per DoF per channel — 860 numbers, nothing learned — plus a linear head reaches macro mAP 0.3299. Your best pretrained probe reaches 0.3507. The gap is 0.0208, about 11× the seed spread. Not a confound: the probe's curve is flat from epoch 11 (+0.0004 over the last five epochs), so it's converged. Window-level BABEL multilabel is largely answerable from "which joints moved, how much, over what range."
+
+2. The torque result survives, and is now much better defended. The moments baseline lets you vary input channels where the ablation varies loss channels. They disagree:
+
+adding tau        as input    as objective
+[0,1] -> [0,1,4]   +0.021       +0.082
+[0,1,2,3] -> all   +0.008       +0.080
+kin_all inverts outright — 98% of full performance as input (0.3197 vs 0.3278), but the worst multi-channel arm as a target (0.2164 vs nodyn's 0.2616). So torque's value is in the objective, not in the feature. That kills the obvious alternative explanation.
+
+3. Your F1 numbers are understated by ~65%. MultilabelF1Score thresholds at 0.5; your median window has 2 labels out of 60. Macro F1 is 0.2224 at 0.5 and 0.3671 at its optimum of 0.16. Affects every arm equally, so it changes no ordering — but it's wrong in every table. mAP is unaffected.
+
+Smaller, worth a sentence each: all 60 labels rank above chance (58 above 3×), so there are no dead classes; low AP in the tail is rarity, not failure — hop is 22.8× chance at AP 0.111. P@1 is 0.737 against a 0.416 frequency prior.
+
+What this means for the paper. The ablation's internal claims hold. The absolute framing doesn't — "pretraining produces a transferable representation" is weak when statistics get 94%. The defensible version reports the baseline as a finding about the benchmark, and a second downstream task requiring temporal order is what would separate "the representation isn't better" from "this benchmark can't tell."
