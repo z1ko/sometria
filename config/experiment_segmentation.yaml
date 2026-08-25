@@ -26,6 +26,12 @@ dataloader:
   label_min_coverage: 0.5
   # 240 frames / patch_size 8. Setting this is what makes the target temporal.
   label_patches: 30
+  # Frame-level annotations only. BABEL's sequence-level ones span 0..dur exactly, so
+  # they are constant across every window and cannot produce a boundary -- keeping them
+  # left 42% of windows with a constant target and 40% of samples contributing nothing
+  # to *when*. Frame-only, with the sequence-only samples dropped: 18% constant, boundary
+  # rate 0.052 -> 0.080, at the cost of 26% of the windows.
+  label_types: ["frame"]
 
   train:
     split_set: babel_official

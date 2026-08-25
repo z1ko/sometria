@@ -41,12 +41,13 @@ model:
   name: classifier
   checkpoint: runs/mamp/lightning_logs/version_1/checkpoints/epoch=8-step=6516.ckpt       # e.g. runs/mamp/lightning_logs/version_0/checkpoints/last.ckpt
   encoder: teacher    # which submodule of the checkpoint holds the weights
-  pool: attentive_factorized
-  lr: 0.001
+  pool: attentive
+  min_lr_frac: 0.5
+  lr: 0.005
 
 training:
   seed: 13
-  epochs: 20
+  epochs: 40
   monitor: val/macro_map
   limit_train_batches: 1.0
   limit_val_batches: 1.0
