@@ -62,7 +62,7 @@ model:
 training:
   seed: 13
   epochs: 20
-  monitor: val/macro_map
+  monitor: val/boundary_best_f1s
   limit_train_batches: 1.0
   limit_val_batches: 1.0
   overfit_batches: 0
