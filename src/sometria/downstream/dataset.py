@@ -139,6 +139,13 @@ class LabelledMotionDataModule(L.LightningDataModule):
         # Set for segmentation, absent for classification. It belongs to the loader
         # rather than the model because it changes the shape of the target.
         self.label_patches = loader.get("label_patches")
+        # Which BABEL annotation levels count. None means both, which is right for
+        # window classification; segmentation wants ("frame",) because a sequence label
+        # spans 0..dur and so is constant across every window it touches. Narrowing it
+        # also drops the samples that have nothing left, rather than leaving them in as
+        # all-negative windows.
+        label_types = loader.get("label_types")
+        self.label_types = None if label_types is None else tuple(label_types)
 
         normalization = loader.get("normalization")
         if normalization is None:
@@ -172,12 +179,15 @@ class LabelledMotionDataModule(L.LightningDataModule):
 
     def _windows(self, spec: MotionViewSpec, *, tiles: bool) -> LabelledWindows:
         samples = build_motion_view(self.root_folder, spec).filter(
-            pl.col("sample_id").is_in(annotated_sample_ids(self.root_folder))
+            pl.col("sample_id").is_in(
+                annotated_sample_ids(self.root_folder, label_types=self.label_types)
+            )
         )
         segments, num_labels = load_label_segments(
             self.root_folder,
             label_set=self.label_set,
             sample_ids=samples["sample_id"].to_list(),
+            **({} if self.label_types is None else {"label_types": self.label_types}),
         )
         self.num_labels = num_labels
 

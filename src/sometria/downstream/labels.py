@@ -29,6 +29,13 @@ LABEL_MIN_COVERAGE = 0.15
 # Sequence-level annotations are kept alongside frame-level ones. They are spans too --
 # BABEL emits them over 0..dur -- and roughly 40% of sequences carry no frame annotation
 # at all, so dropping them would make those samples silently all-negative.
+#
+# That is the right default for window classification and the wrong one for segmentation.
+# A sequence label runs 0..dur exactly, so it covers every patch of every window and can
+# never produce a boundary: on babel_official/val it is 40% of samples contributing full
+# gradient to *what* and none to *when*, and it is why 42% of segmentation windows carry
+# a constant target. Pass ``label_types=("frame",)`` there -- and filter the samples to
+# match, or the sequence-only ones stay in as all-negative windows.
 LABEL_TYPES = ("frame", "sequence")
 
 
@@ -52,6 +59,7 @@ def load_label_segments(
     *,
     label_set: str,
     sample_ids: list[str] | None = None,
+    label_types: tuple[str, ...] = LABEL_TYPES,
 ) -> tuple[dict[str, np.ndarray], int]:
     """Return ``{sample_id: (n, 3) array of [start_t, end_t, label_index]}``.
 
@@ -72,7 +80,7 @@ def load_label_segments(
 
     annotations = load_annotations(root).filter(
         (pl.col("ontology") == ontology)
-        & pl.col("label_type").is_in(LABEL_TYPES)
+        & pl.col("label_type").is_in(list(label_types))
         & pl.col("start_t").is_not_null()
         & pl.col("end_t").is_not_null()
     )
@@ -94,7 +102,11 @@ def load_label_segments(
     return segments, num_labels
 
 
-def annotated_sample_ids(root: str | Path, ontology: str = "act_cat") -> set[str]:
+def annotated_sample_ids(
+    root: str | Path,
+    ontology: str = "act_cat",
+    label_types: tuple[str, ...] | None = None,
+) -> set[str]:
     """Sample ids carrying at least one annotation in ``ontology``.
 
     Not the same question as "has a label in the vocabulary". A sample whose only
@@ -103,9 +115,16 @@ def annotated_sample_ids(root: str | Path, ontology: str = "act_cat") -> set[str
     sample with no ``act_cat`` at all is *unknown*, and calling it negative would be
     inventing labels: BABEL withholds ``act_cat`` for its whole test split, and carries
     free-text-only annotations elsewhere.
+
+    ``label_types`` narrows what counts as annotated, and must match whatever
+    :func:`load_label_segments` was narrowed to: a sample kept here whose every segment
+    is dropped there becomes an all-negative window, which is the silent-negative failure
+    this function exists to prevent.
     """
 
     annotations = load_annotations(root).filter(pl.col("ontology") == ontology)
+    if label_types is not None:
+        annotations = annotations.filter(pl.col("label_type").is_in(list(label_types)))
     return set(annotations["sample_id"].unique().to_list())
 
 

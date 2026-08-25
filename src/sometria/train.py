@@ -88,7 +88,9 @@ def train(config: DictConfig, output: Path):
             LearningRateMonitor(logging_interval="step"),
             ModelCheckpoint(
                 monitor=monitor,
-                mode="max" if monitor.endswith("map") else "min",
+                # Every metric here is better-when-higher except the losses; keying on
+                # "map" silently made mode="min" for f1 monitors and saved the worst epoch.
+                mode="min" if monitor.endswith("loss") else "max",
                 save_top_k=1,
                 save_last=True,
             ),
