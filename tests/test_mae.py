@@ -170,6 +170,33 @@ def test_a_channel_loss_is_that_channel_and_no_other():
     assert split[1].item() == 4.0
     assert all(v.item() == 0.0 for i, v in enumerate(split) if i != 1)
 
+def test_a_narrowed_loss_scores_those_channels_of_the_right_patch():
+    """The channels are a stride inside a token, not a slice off its end."""
+
+    model = _model(loss_channels=(0, 1))
+    assert model.prediction.out_features == SPEC.patch_size * 2
+    assert model.channel_names == ("sin", "cos")
+
+    x = _features(batch=1)
+    _, target, window = model(x, generator=t.Generator().manual_seed(0))
+    assert target.shape[-1] == SPEC.patch_size * 2
+
+    for k, flat in enumerate(window.mask.targets[0].tolist()[:20]):
+        patch, dof = divmod(flat, D)
+        lo = patch * SPEC.patch_size
+        want = x[0, lo : lo + SPEC.patch_size, dof][:, [0, 1]].flatten()
+        assert t.allclose(target[0, k], want, atol=1e-6), (patch, dof)
+
+
+def test_an_out_of_range_or_empty_loss_channel_set_is_rejected():
+    for bad in ((), (0, C)):
+        try:
+            _model(loss_channels=bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected a ValueError for loss_channels={bad}")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

@@ -8,6 +8,7 @@
 #                                  is pretraining doing anything at all
 #   ./scripts/ablate.sh mask       mask_ratio 0.90 / 0.95 / 0.98
 #   ./scripts/ablate.sh decoder    decoder_depth 1 / 3 / 6
+#   ./scripts/ablate.sh channels   score the loss on pose only, vs every channel
 #   ./scripts/ablate.sh probe      probe every pretraining run that has no probe yet
 #   ./scripts/ablate.sh report     read the tables back
 #   ./scripts/ablate.sh all        noise, signal, mask, decoder, probe, report
@@ -125,6 +126,14 @@ stage_decoder() {
     done
 }
 
+stage_channels() {
+    # acc reaches only 0.65 in forty epochs where sin reaches 0.06, and vel+acc are ~72%
+    # of the total loss: most of the gradient is spent on what cannot be predicted. This
+    # asks whether dropping them from the loss -- not from the input -- helps the probe.
+    pretrain "channels_pose" "model.loss_channels=[0,1]"
+    pretrain "channels_nodyn" "model.loss_channels=[0,1,4]"
+}
+
 stage_probe() {
     local ckpt
     for dir in "$RUNS"/pretrain/*/; do
@@ -156,10 +165,11 @@ case "${1:-all}" in
     noise)   stage_noise ;;
     signal)  stage_signal ;;
     mask)    stage_mask ;;
-    decoder) stage_decoder ;;
+    decoder)  stage_decoder ;;
+    channels) stage_channels ;;
     probe)   stage_probe ;;
     report)  stage_report ;;
-    all)     stage_noise; stage_signal; stage_mask; stage_decoder
+    all)     stage_noise; stage_signal; stage_mask; stage_decoder; stage_channels
              stage_probe; stage_report ;;
     *)       sed -n '2,23p' "$0" >&2; exit 2 ;;
 esac

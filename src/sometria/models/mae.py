@@ -1,8 +1,13 @@
 """Plain MAE over motion tokens: hide most of the window, reconstruct what was hidden.
 
 The sibling of :class:`~sometria.models.mamp.MaskedMotionPredictor`, and the simpler of
-the two: the target is always the input's own patch values, the mask is always uniform,
-and the loss scores every channel. Nothing branches, because nothing here is optional.
+the two: the target is always the input's own patch values and the mask is always uniform.
+
+``loss_channels`` narrows which channels the loss scores, and defaults to all of them.
+It is worth narrowing: standardized per token, ``acc`` starts near 1.0 and reaches only
+0.65 after forty epochs while ``sin`` reaches 0.06, so acceleration contributes most of
+the gradient and almost none of the learnable signal. Narrowing the loss does not narrow
+the input -- the encoder still reads every channel; only the head stops predicting them.
 
 The encoder is built here from an
 :class:`~sometria.architecture.encoder.EncoderSpec` rather than being handed in, because
@@ -53,6 +58,7 @@ class MaskedAutoencoder(PretextObjective):
         mask: MaskSpec | dict | None = None,
         *,
         decoder_depth: int = 5,
+        loss_channels: tuple[int, ...] | None = None,   # None scores every channel
         norm_targets: bool = True,
         lr: float = 1e-3,
         min_lr_frac: float = 0.5,
@@ -73,6 +79,18 @@ class MaskedAutoencoder(PretextObjective):
             spec = EncoderSpec(**spec)
         self.spec = spec = spec or EncoderSpec()
 
+        # Resolved against the spec, so the stored hyperparameter is always an explicit
+        # tuple and a reloaded checkpoint never depends on what the default meant that day.
+        loss_channels = tuple(
+            range(spec.num_features) if loss_channels is None else loss_channels
+        )
+        if not loss_channels:
+            raise ValueError("the loss needs at least one channel to score.")
+        if not all(0 <= c < spec.num_features for c in loss_channels):
+            raise ValueError(
+                f"loss_channels {loss_channels} out of range for {spec.num_features} channels."
+            )
+
         # Saved here rather than through ``save_objective_hyperparameters``: that helper
         # stores the architecture under ``backbone``, and a hyperparameter only rebuilds
         # the model if its name is this constructor's argument name.
@@ -85,12 +103,15 @@ class MaskedAutoencoder(PretextObjective):
                 "weight_decay": weight_decay,
                 "warmup_frac": warmup_frac,
                 "decoder_depth": decoder_depth,
+                "loss_channels": loss_channels,
                 "norm_targets": norm_targets,
             }
         )
 
         self.norm_targets = norm_targets
-        self.channel_names = channel_names()
+        self.loss_channels = loss_channels
+        self.register_buffer("loss_channel_index", t.tensor(loss_channels, dtype=t.long))
+        self.channel_names = channel_names(loss_channels)
         time_patches, num_dofs = spec.grid_shape
 
         # The encoder is a module rather than three loose fields because it is the one
@@ -102,7 +123,7 @@ class MaskedAutoencoder(PretextObjective):
         self.mask_token = nn.Parameter(t.zeros(1, 1, spec.d_model))
         self.decoder_position = PositionalEncoding(time_patches, num_dofs, spec.d_model)
         self.decoder = transformer_stack(spec, decoder_depth)
-        self.prediction = nn.Linear(spec.d_model, spec.token_dim)
+        self.prediction = nn.Linear(spec.d_model, spec.patch_size * len(loss_channels))
 
         nn.init.normal_(self.mask_token, std=0.02)
 
@@ -112,6 +133,18 @@ class MaskedAutoencoder(PretextObjective):
         return self.backbone.embed_values(
             window.values, window.num_time_patches, index=window.mask.context
         )
+
+    def scored_values(self, values: t.Tensor) -> t.Tensor:
+        """``(B, L, patch_size * len(loss_channels))`` -- the target the loss actually sees.
+
+        A token flattens ``(patch_size, num_features)``, so channels are a stride, not a
+        slice: unflatten, take the columns, flatten back.
+        """
+
+        if len(self.loss_channels) == self.spec.num_features:
+            return values
+        patches = values.unflatten(-1, (self.spec.patch_size, self.spec.num_features))
+        return patches[..., self.loss_channel_index].flatten(start_dim=-2)  # type: ignore
 
     def forward(
         self,
@@ -136,10 +169,11 @@ class MaskedAutoencoder(PretextObjective):
         decoded = self.decoder(tokens + self.decoder_position.get_flat(window.num_time_patches))
         prediction = self.prediction(decoded)
 
-        return window.mask.targets_of(prediction), window.mask.targets_of(window.values), window
+        target = self.scored_values(window.values)
+        return window.mask.targets_of(prediction), window.mask.targets_of(target), window
 
     def reconstruction_loss(self, prediction: t.Tensor, target: t.Tensor) -> t.Tensor:
-        """``prediction`` and ``target`` are both ``(B, N, patch_size * num_features)``."""
+        """``prediction`` and ``target`` are both ``(B, N, patch_size * len(loss_channels))``."""
 
         if self.norm_targets:
             target = standardize_tokens(target)
