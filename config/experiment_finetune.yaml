@@ -1,0 +1,58 @@
+# Finetune: the same head as the linear probe, with the backbone training under it.
+# Point `checkpoint` at a pretraining run; the backbone spec travels in its hparams, so
+# the `encoder` block below only has to match for a run trained from scratch -- and that
+# run is the control this experiment needs, because a finetune that beats a from-scratch
+# model by nothing has shown the pretraining was worth nothing.
+
+dataloader:
+  root: data/processed
+  human: config/human.yaml
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_train_clean.pt
+  batch_size: 32
+  num_workers: 4
+  window_frames: 240
+  label_set: babel_action_60
+  label_min_coverage: 0.15
+
+  train:
+    split_set: babel_official
+    split: train
+    source_datasets: ["AMASS"]
+
+  val:
+    split_set: babel_official
+    split: val
+    source_datasets: ["AMASS"]
+
+# Only read when `model.checkpoint` is null: a pretrained backbone brings its own spec in
+# the checkpoint's hparams. Keep it matching the pretraining config anyway, or the
+# random-initialization control stops being the same architecture as what it controls for.
+encoder:
+  num_dofs: 43
+  num_features: 5
+  patch_size: 8
+  window_frames: 240
+  d_model: 256
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+model:
+  name: finetune
+  checkpoint: runs/mamp/lightning_logs/version_0/checkpoints/last.ckpt
+  encoder: teacher       # which submodule of the checkpoint holds the weights
+  pool: attentive        # "mean" | "mean_max" | "attentive" | "attentive_factorized"
+  lr: 0.001              # the fresh head and pooler
+  backbone_lr: 0.00001   # 100x lower: the backbone is already near where it should be
+  weight_decay: 0.05     # 2-D parameters only, see downstream/finetune.py
+  min_lr_frac: 0.01      # decay to nothing, unlike a probe -- this one is the final model
+  warmup: 0.05
+
+training:
+  seed: 13
+  epochs: 30
+  monitor: val/macro_map
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  overfit_batches: 0
