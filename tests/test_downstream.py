@@ -16,6 +16,7 @@ from sometria.architecture.encoder import EncoderSpec, MotionTransformerEncoder,
 from sometria.architecture.scheduler import lr_schedule
 from sometria.downstream.dataset import LabelledWindows, _tiles
 from sometria.downstream.classifier import MotionLinearClassifier
+from sometria.downstream.finetune import MotionFinetuneClassifier
 from sometria.downstream.labels import window_multi_hot
 from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAveragePrecision
 from sometria.models.mamp import MaskedMotionPredictor
@@ -225,6 +226,72 @@ def test_a_probe_leaves_the_backbone_untouched():
     model = _probe()
     model.loss(model(_features()), t.zeros(2, LABELS)).backward()
     assert all(p.grad is None for p in model.backbone.parameters())
+
+
+# --- finetune -------------------------------------------------------------------------
+
+def _finetune(pool="mean", **kwargs):
+    return MotionFinetuneClassifier(
+        MotionTransformerEncoder(SPEC), num_labels=LABELS, pool=pool, **kwargs
+    )
+
+
+def test_a_finetune_trains_the_backbone():
+    """Every way the probe holds the backbone still has to be undone here."""
+
+    model = _finetune()
+    model.train()
+
+    assert model.backbone.training
+    assert all(p.requires_grad for p in model.backbone.parameters())
+
+    model.loss(model(_features()), t.zeros(2, LABELS)).backward()
+    assert all(p.grad is not None for p in model.backbone.parameters())
+
+
+def test_a_finetune_runs_the_backbone_slower_than_the_head():
+    model = _finetune(lr=1e-3, backbone_lr=1e-5)
+    model._trainer = SimpleNamespace(estimated_stepping_batches=10)
+    optimizer = model.configure_optimizers()["optimizer"]
+
+    backbone_ids = {id(p) for p in model.backbone.parameters()}
+    rates = {}
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            # initial_lr, not lr: the schedule has already applied its warmup factor
+            rates[id(p)] = group["initial_lr"]
+
+    assert {id(p) for p in model.parameters()} == set(rates)
+    assert all(rates[i] == 1e-5 for i in backbone_ids)
+    assert all(rates[id(p)] == 1e-3 for p in model.head.parameters())
+
+
+def test_a_finetune_does_not_decay_norms_and_biases():
+    """Decay on a 1-D parameter is not regularization, it is a pull toward zero."""
+
+    model = _finetune(weight_decay=0.05)
+    model._trainer = SimpleNamespace(estimated_stepping_batches=10)
+    optimizer = model.configure_optimizers()["optimizer"]
+
+    for group in optimizer.param_groups:
+        expected = 0.05 if group["params"] and group["params"][0].ndim >= 2 else 0.0
+        assert all((p.ndim >= 2) == (expected > 0) for p in group["params"])
+        assert group["weight_decay"] == expected
+
+
+def test_both_finetune_rates_decay_together():
+    """One factor schedule over groups whose base rates differ by 100x."""
+
+    model = _finetune(lr=1e-3, backbone_lr=1e-5, min_lr_frac=0.01, warmup=0.1)
+    model._trainer = SimpleNamespace(estimated_stepping_batches=100)
+    bundle = model.configure_optimizers()
+    optimizer, scheduler = bundle["optimizer"], bundle["lr_scheduler"]["scheduler"]
+
+    for _ in range(100):
+        optimizer.step()
+        scheduler.step()
+
+    assert all(g["lr"] < 0.02 * g["initial_lr"] for g in optimizer.param_groups)
 
 
 def test_a_pretrained_backbone_arrives_with_its_weights():
