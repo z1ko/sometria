@@ -10,6 +10,11 @@ fresh head moves at ``lr``. Pretrained weights are close to where they should be
 random head is not, so one rate for both either scrambles the backbone or starves the
 head. Ten to a hundred times lower is the usual range.
 
+``dropout`` is the one architectural knob, and it has to live here rather than in the
+config's ``encoder:`` block: that block is only read when no checkpoint is named, so a
+pretrained backbone always arrives at whatever dropout it was pretrained with. Leave it
+``None`` until a run actually overfits.
+
 Not here: layer-wise learning-rate decay. It is the next thing to try if a lower
 ``backbone_lr`` alone does not stop the early epochs from undoing the pretraining, but it
 is a per-block optimizer group for a gain this codebase has not measured yet.
@@ -55,6 +60,7 @@ class MotionFinetuneClassifier(MotionLinearClassifier):
         lr: float = 1e-3,
         backbone_lr: float = 1e-4,
         weight_decay: float = 0.05,
+        dropout: float | None = None,
         warmup: float = 0.05,
     ) -> None:
         super().__init__(
@@ -73,6 +79,14 @@ class MotionFinetuneClassifier(MotionLinearClassifier):
         # which is correct there and is exactly what this class exists not to do.
         self.backbone.requires_grad_(True)
         self.backbone.train()
+
+        # Set on the modules rather than rebuilt from a new spec: dropout is a rate, not a
+        # weight, so a pretrained backbone can be regularized without reloading it. The
+        # spec is left reporting what pretraining used, which is what it is a record of.
+        if dropout is not None:
+            for module in self.backbone.modules():
+                if isinstance(module, nn.Dropout):
+                    module.p = dropout
 
     def train(self, mode: bool = True) -> "MotionFinetuneClassifier":
         """Follow the parent module, unlike the probe, which pins the backbone to eval.

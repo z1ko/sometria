@@ -249,6 +249,18 @@ def test_a_finetune_trains_the_backbone():
     assert all(p.grad is not None for p in model.backbone.parameters())
 
 
+def test_a_finetune_can_regularize_a_pretrained_backbone():
+    """The config's `encoder:` block is dead for a loaded checkpoint, so the knob is here."""
+
+    assert all(m.p == 0.0 for m in _finetune().backbone.modules() if isinstance(m, t.nn.Dropout))
+
+    model = _finetune(dropout=0.2)
+    rates = [m.p for m in model.backbone.modules() if isinstance(m, t.nn.Dropout)]
+    assert rates and all(p == 0.2 for p in rates)
+    # the spec still records what pretraining used
+    assert model.backbone.spec.dropout == 0.0
+
+
 def test_a_finetune_runs_the_backbone_slower_than_the_head():
     model = _finetune(lr=1e-3, backbone_lr=1e-5)
     model._trainer = SimpleNamespace(estimated_stepping_batches=10)

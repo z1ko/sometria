@@ -8,7 +8,7 @@ dataloader:
   root: data/processed
   human: config/human.yaml
   normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_train_clean.pt
-  batch_size: 32
+  batch_size: 128
   num_workers: 4
   window_frames: 240
   label_set: babel_action_60
@@ -43,15 +43,15 @@ model:
   checkpoint: runs/mamp/lightning_logs/version_0/checkpoints/last.ckpt
   encoder: teacher       # which submodule of the checkpoint holds the weights
   pool: attentive        # "mean" | "mean_max" | "attentive" | "attentive_factorized"
-  lr: 0.001              # the fresh head and pooler
-  backbone_lr: 0.00001   # 100x lower: the backbone is already near where it should be
-  weight_decay: 0.05     # 2-D parameters only, see downstream/finetune.py
+  lr: 0.005              # the fresh head and pooler
+  backbone_lr: 0.00001   # the backbone is already near where it should be
+  weight_decay: 0.01     # 2-D parameters only, see downstream/finetune.py
   min_lr_frac: 0.01      # decay to nothing, unlike a probe -- this one is the final model
   warmup: 0.05
 
 training:
   seed: 13
-  epochs: 30
+  epochs: 50
   monitor: val/macro_map
   limit_train_batches: 1.0
   limit_val_batches: 1.0
