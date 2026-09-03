@@ -5,12 +5,14 @@
 #   EPOCHS=10 ./scripts/baseline_matrix.sh
 #   DRY=1 ./scripts/baseline_matrix.sh
 #   RUNS=runs/other PYTHON=python ./scripts/baseline_matrix.sh
+#   SIZE=config/mae/tiny.yaml ./scripts/baseline_matrix.sh
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 PYTHON=(${PYTHON:-uv run python})
 CONFIG=${CONFIG:-config/pretrain_mae.yaml}
+SIZE=${SIZE:-config/mae/small.yaml}
 RUNS=${RUNS:-runs/baseline_matrix}
 EPOCHS=${EPOCHS:-10}
 DRY=${DRY:-}
@@ -42,7 +44,7 @@ for i in "${!names[@]}"; do
         done_already "$out" && continue
 
         echo "train  $name"
-        run "${PYTHON[@]}" train.py --config "$CONFIG" --output "$out" \
+        run "${PYTHON[@]}" train.py --config "$CONFIG" "$SIZE" --output "$out" \
             $(epochs_override) \
             "model.channels_input=${channels[$i]}" \
             "model.channels_output=${channels[$j]}"

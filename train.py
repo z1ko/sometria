@@ -53,11 +53,11 @@ def train(config: DictConfig, output: Path):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train baseline MAE.")
-    parser.add_argument("--config", type=Path, default=Path("config/pretrain_mae.yaml"))
+    parser.add_argument("--config", type=Path, nargs="+", default=[Path("config/pretrain_mae.yaml")])
     parser.add_argument("--output", type=Path, default=Path("runs/mae"))
     args, overrides = parser.parse_known_args()
 
-    config = OmegaConf.merge(OmegaConf.load(args.config), OmegaConf.from_dotlist(overrides))
+    config = OmegaConf.merge(*(OmegaConf.load(path) for path in args.config), OmegaConf.from_dotlist(overrides))
     args.output.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(config, args.output / "config.yaml")
     train(config, args.output) # type: ignore
