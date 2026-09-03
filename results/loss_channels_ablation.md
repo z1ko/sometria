@@ -10,4 +10,4 @@
 | $\sin\theta, \cos\theta, \dot\theta, \ddot\theta$ | Kinematic Only | 32 | 0.216 | 0.426 | 0.074 | 52.1% |
 | **All Five Channels** | **Kinematic + Dynamic** | **40** | **0.297** | **0.493** | **0.143** | **100.0%** |
 
-Note: Tested on mae_40ep with a attentive probe for 20ep
+Note: Tested on mae_40ep with a attentive probe for 20ep()
