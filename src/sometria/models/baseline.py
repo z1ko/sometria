@@ -189,12 +189,17 @@ class MAE(L.LightningModule):
         h = self.encoder(x[..., self.channels_input], keep_idx, None)
         prediction = self.decoder(h, keep_idx)
 
-        # inputs are pre-normalized per (DOF, channel), so the target is just
-        # the patchified signal -- no MAE-style per-patch normalization
         target = patchify(x[..., self.channels_output], self.num_frames_in_patch).flatten(1, 2)
+
+        # Per-token normalization: the loss asks for the shape of a patch,
+        # not its magnitude. Without this, high-variance channels (acc, tau)
+        # dominate the gradient and the model learns noise.
+        target_mean = target.mean(dim=-1, keepdim=True)
+        target_var = target.var(dim=-1, keepdim=True)
+        target_norm = (target - target_mean) / (target_var + 1e-6).sqrt()
         return F.mse_loss(
             gather_tokens(prediction, mask_idx), 
-            gather_tokens(target, mask_idx)
+            gather_tokens(target_norm, mask_idx)
         )
 
     def training_step(self, x: dict, _):
