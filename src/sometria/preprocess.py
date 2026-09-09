@@ -152,6 +152,19 @@ def measure_quality(motion: np.ndarray, hz: float, tau_rate_max: float = TAU_RAT
     }
 
 
+def _source_subset(source_path: str) -> str:
+    """Return the corpus subset a relative source path belongs to.
+
+    AMASS and MotionX are laid out as ``<subset>/<...>/<take>.csv``, so the leading
+    directory names the subset. CARE-PD ships flat, encoding the same thing as a
+    ``<subset>__<subject>__<take>.csv`` filename prefix.
+    """
+
+    head = source_path.split("/")[0]
+    # ponytail: two layouts, one line. Add a hook on ImportConfig if a third appears.
+    return head if "/" in source_path else head.split("__")[0]
+
+
 @dataclass(frozen=True)
 class ImportConfig:
     """Configuration for importing one raw dataset into the processed layout."""
@@ -206,7 +219,7 @@ def import_opensim_csv_dataset(
             {
                 "sample_id": sample_id,
                 "source_dataset": config.source_dataset,
-                "source_subset": source_path.split("/")[0],
+                "source_subset": _source_subset(source_path),
                 "source_path": source_path,
                 "motion_path": str(tensor_path.relative_to(config.output_root)),
                 "representation": representation.name,

@@ -253,12 +253,19 @@ def create_pretrain_split(
     *,
     output_root: str | Path,
     split_set: str = "pretrain_v1",
+    source_datasets: tuple[str, ...] = (),
 ) -> pl.DataFrame:
     """Create the default self-supervised pretraining split.
 
-    The current policy includes BABEL train samples plus AMASS samples with no
-    BABEL official split membership. BABEL validation and test samples are kept
-    out so they remain usable as held-out views.
+    The current policy includes BABEL train samples plus samples with no BABEL
+    official split membership. BABEL validation and test samples are kept out so
+    they remain usable as held-out views.
+
+    ``source_datasets`` restricts the split to named corpora. Leaving it empty means
+    "every corpus in the catalog", which is right while every import is pretraining
+    data and wrong the moment one is an evaluation corpus: CARE-PD is imported for a
+    clinical probe, and pretraining on it would train on the probe's own subjects.
+    Name the corpora rather than relying on the default once such a corpus exists.
 
     This lives beside ``build_motion_view`` rather than in ``babel``: persisting a
     view and materializing one are the same question asked in two directions, and
@@ -269,10 +276,13 @@ def create_pretrain_split(
     catalog = load_catalog(output_root)
     splits = load_splits(output_root)
 
+    if source_datasets:
+        catalog = catalog.filter(pl.col("source_dataset").is_in(source_datasets))
+
     babel_train_ids = splits.filter(
         (pl.col("split_set") == "babel_official")
         & (pl.col("split") == "train")
-    ).select("sample_id")
+    ).select("sample_id").join(catalog.select("sample_id"), on="sample_id", how="semi")
 
     babel_any_ids = splits.filter(
         pl.col("split_set") == "babel_official"
