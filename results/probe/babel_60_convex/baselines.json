@@ -1,0 +1,20 @@
+{
+  "chance": {
+    "macro_map": 0.0421,
+    "micro_map": 0.0421,
+    "protocol": "exact, no model",
+    "note": "Average precision of a random ranking equals the class positive rate, so this is the mean per-class positive rate over the 4,936 BABEL-60 validation windows (2.52 labels per window). Computed directly from the annotations, so it is protocol-independent and exact rather than measured."
+  },
+  "moments": {
+    "macro_map": 0.3303,
+    "micro_map": 0.5106,
+    "protocol": "matched data/labels/metrics, AdamW head",
+    "note": "mean, std, min and max of every DOF x channel over the window -- 43 x 5 x 4 = 860 arithmetic numbers, no pretraining and no network -- into a linear head. Run via `scripts/moments_baseline.py --config config/experiment_linear_probe.yaml --passes 20`, so the data, label set, normalization and metrics are the probe's; only the input and the head fit differ (AdamW for 40 epochs here against the probe's convex L-BFGS). This is the baseline that says whether a probe score is *good*: the whole pretrained transformer buys +0.041 macro mAP over it, 12% relative."
+  },
+  "random encoder": {
+    "macro_map": 0.128,
+    "micro_map": 0.334,
+    "protocol": "NOT matched -- attentive probe, 20ep",
+    "note": "Untrained frozen backbone, from the attentive-probe era recorded in `results/loss_channels_ablation.md`. Kept as the only reference for an untrained network, but the readout differs (attentive pooling, AdamW) so it is not comparable cell-for-cell with the tables above. `probe_convex_mae.py` requires a checkpoint, so measuring this under the convex protocol needs a random-init path added first."
+  }
+}

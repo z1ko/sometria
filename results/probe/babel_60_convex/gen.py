@@ -242,6 +242,40 @@ def best_cells(df: pl.DataFrame) -> str:
     return "\n".join(lines)
 
 
+def reference_points(df: pl.DataFrame) -> list[str]:
+    """Render baselines.json, if present, against the best cell in the matrix.
+
+    These do not come from runs/, so they cannot be derived the way everything else here
+    is. They live in a JSON file rather than in the prose so the comparison against the
+    best cell is computed, and so each carries its own protocol note -- the floor is only
+    meaningful if you can see how it was measured.
+    """
+
+    path = HERE / "baselines.json"
+    if not path.exists():
+        return []
+
+    baselines = json.loads(path.read_text())
+    best = {m: df[m].max() for m in REPORTED}
+
+    lines = [
+        "## Reference points",
+        "",
+        "| baseline | " + " | ".join(TITLES.get(m, m) for m in REPORTED) + " | vs best cell | protocol |",
+        "| :--- |" + " ---: |" * (len(REPORTED) + 1) + " :--- |",
+    ]
+    for name, entry in baselines.items():
+        ratio = f"{best[REPORTED[0]] / entry[REPORTED[0]]:.2f}x" if entry.get(REPORTED[0]) else "--"
+        values = " | ".join(
+            f"{entry[m]:.4f}" if entry.get(m) is not None else "--" for m in REPORTED
+        )
+        lines.append(f"| {name} | {values} | {ratio} | {entry['protocol']} |")
+    lines += ["", f"*Best cell: {best[REPORTED[0]]:.4f} macro mAP.*", ""]
+    lines += [f"- **{name}** -- {entry['note']}" for name, entry in baselines.items()]
+    lines += [""]
+    return lines
+
+
 def tables(df: pl.DataFrame) -> str:
     corpora = sorted(df["corpus"].unique())
     parts = [f"*{len(df)} cells across {len(corpora)} corpora. Regenerate with `gen.py`.*", ""]
@@ -253,7 +287,7 @@ def tables(df: pl.DataFrame) -> str:
                 subset = df.filter((pl.col("corpus") == corpus) & (pl.col("arch") == arch))
                 runs = subset.group_by("cell").len()["len"].max()
                 label = f"{runs} seeds" if runs > 1 else "1 seed, no error bar"
-                parts += [f"**`{corpus}` / {arch}** ({label})", "", matrix(subset, metric), ""]
+                parts += [f"### `{corpus}` / {arch} ({label})", "", matrix(subset, metric), ""]
 
         # Only meaningful against a reference corpus; the first alphabetically is the
         # AMASS-only baseline every later corpus adds to.
@@ -261,7 +295,7 @@ def tables(df: pl.DataFrame) -> str:
             base = corpora[0]
             for other in corpora[1:]:
                 table, note = delta(df, base, other, metric)
-                parts += [f"**Delta, `{other}` − `{base}`**", "", table, "", note, ""]
+                parts += [f"### Delta, `{other}` − `{base}`", "", table, "", note, ""]
 
     parts += ["## Best cell per corpus", "", best_cells(df), ""]
 
@@ -294,6 +328,8 @@ def tables(df: pl.DataFrame) -> str:
             ),
             "",
         ]
+    parts += reference_points(df)
+
     parts += ["## Provenance", ""]
     # Grouped by statistics file rather than listed per run: when replicates of one corpus
     # were normalized differently, that is the thing to notice, and a bare list of two

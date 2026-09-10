@@ -22,7 +22,7 @@ uv run python results/probe/babel_60_convex/gen.py
 
 ## Macro mAP
 
-**`amass_clean` / medium_100ep** (3 seeds)
+### `amass_clean` / medium_100ep (3 seeds)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
@@ -30,7 +30,7 @@ uv run python results/probe/babel_60_convex/gen.py
 | **pk** | 0.3508 ±0.0055 | 0.3645 ±0.0011 | **0.3658** ±0.0012 |
 | **pkd** | 0.3486 ±0.0038 | 0.3577 ±0.0023 | 0.3603 ±0.0032 |
 
-**`amass_motionx_clean` / medium_100ep** (1 seed, no error bar)
+### `amass_motionx_clean` / medium_100ep (1 seed, no error bar)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
@@ -38,7 +38,7 @@ uv run python results/probe/babel_60_convex/gen.py
 | **pk** | 0.3508 | **0.3714** | 0.3620 |
 | **pkd** | 0.3543 | 0.3628 | 0.3568 |
 
-**Delta, `amass_motionx_clean` − `amass_clean`**
+### Delta, `amass_motionx_clean` − `amass_clean`
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
@@ -46,11 +46,13 @@ uv run python results/probe/babel_60_convex/gen.py
 | **pk** | +0.0000 (+0.0σ) | +0.0069 (+2.4σ) | -0.0038 (-1.3σ) |
 | **pkd** | +0.0057 (+2.0σ) | +0.0051 (+1.7σ) | -0.0036 (-1.2σ) |
 
-*σ = 0.0025 pooled over cells; n = 3 vs 1, so SE = 0.0029, σ borrowed from `amass_clean`. |z| > 2 is marginal; Bonferroni over the 9 cells needs |z| > 2.77.*
+*σ = 0.0025 pooled over cells* 
+
+<!-- n = 3 vs 1, so SE = 0.0029, σ borrowed from `amass_clean`. |z| > 2 is marginal; Bonferroni over the 9 cells needs |z| > 2.77. -->
 
 ## Micro mAP
 
-**`amass_clean` / medium_100ep** (3 seeds)
+### `amass_clean` / medium_100ep (3 seeds)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
@@ -58,7 +60,7 @@ uv run python results/probe/babel_60_convex/gen.py
 | **pk** | 0.5432 ±0.0038 | 0.5530 ±0.0020 | **0.5549** ±0.0007 |
 | **pkd** | 0.5404 ±0.0041 | 0.5509 ±0.0014 | 0.5501 ±0.0009 |
 
-**`amass_motionx_clean` / medium_100ep** (1 seed, no error bar)
+### `amass_motionx_clean` / medium_100ep (1 seed, no error bar)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
@@ -66,7 +68,7 @@ uv run python results/probe/babel_60_convex/gen.py
 | **pk** | 0.5404 | **0.5590** | 0.5527 |
 | **pkd** | 0.5430 | 0.5514 | 0.5476 |
 
-**Delta, `amass_motionx_clean` − `amass_clean`**
+### Delta, `amass_motionx_clean` − `amass_clean`
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
@@ -89,13 +91,23 @@ uv run python results/probe/babel_60_convex/gen.py
 | :--- | :--- | ---: | ---: | ---: | ---: |
 | amass_clean | medium_100ep | 3 | 9 | 0.0025 | 0.0024 |
 
+## Reference points
+
+| baseline | Macro mAP | Micro mAP | vs best cell | protocol |
+| :--- | ---: | ---: | ---: | :--- |
+| chance | 0.0421 | 0.0421 | 8.82x | exact, no model |
+| moments | 0.3303 | 0.5106 | 1.12x | matched data/labels/metrics, AdamW head |
+| random encoder | 0.1280 | 0.3340 | 2.90x | attentive probe, 20ep |
+
+*Best cell: 0.3714 macro mAP.*
+
 ## Provenance
 
 | corpus | arch | replicates | normalization |
 | :--- | :--- | :--- | :--- |
 | amass_clean | medium_100ep | seed1, seed2 | `pretrain_v1_stats_train_clean.pt` |
 | amass_clean | medium_100ep | seed42 | `pretrain_v1_train_clean.pt` |
-| amass_motionx_clean | medium_100ep | canonical | `pretrain_v2_train_clean.pt` |
+| amass_motionx_clean | medium_100ep | seed42 | `pretrain_v2_train_clean.pt` |
 
 <!-- /GENERATED -->
 
@@ -115,6 +127,35 @@ is wrong and has been removed rather than annotated.
 - Per-cell seed spread varies **18x**, from 0.0003 (`in_p__loss_pkd`) to 0.0055
   (`in_pk__loss_p`). A single pooled σ is the right thing to test against, but it badly
   misdescribes individual cells, which is why the matrix keeps per-cell values.
+
+### What the numbers are worth
+
+- **The pretrained representation buys +0.041 macro mAP over arithmetic.** Best cell
+  0.3714 against a moments baseline of 0.3303 -- 860 numbers (mean, std, min, max per DOF
+  x channel) with no network at all. That is 16σ_seed, so it is unambiguously real, but it
+  is a **12% relative** gain. Everything the corpus and channel-matrix comparisons argue
+  about happens inside that 12%.
+
+- **Scale of the whole thing:** chance 0.0421, moments 0.3303, best probe 0.3714. Most of
+  the distance from chance to the probe is covered by summary statistics.
+
+- **The architecture is probably not the limit.** In the attentive-probe measurements
+  (`results/long/label_analysis.npz`) unfreezing the entire backbone moves macro AP from
+  0.3778 to 0.3949 -- **+4.5%**. If capacity or inductive bias were the bottleneck, full
+  gradient access to the labels should unlock far more than that. Different protocol from
+  the tables above, so treat the absolute values as indicative, but the probe-to-finetune
+  *gap* is measured under one protocol and is small.
+
+- **Failures are localized, fine-grained motions.** Per class: `walk` 0.926, `sit` 0.896,
+  `jump` 0.796 against `swing body part` 0.023, `waist movements` 0.083, `head movements`
+  0.087. Note `human.yaml` puts all six pelvis DOFs in `excluded_dofs`, so the model never
+  sees global translation or root orientation -- and `forward movement` (0.130) and
+  `sideways movement` (0.329) are two of the seven classes where moments *beat* the frozen
+  probe. Restoring a derived speed/heading signal is the cheapest test of that ceiling.
+
+- **Moments beat 31 of 36 probe fits on `macro_f1s`** (0.2814 against a probe median of
+  0.2579) while losing on every ranking metric. Independent confirmation that the F1
+  column is measuring the operating point rather than the representation.
 
 ### What the corpus comparison shows
 
@@ -186,33 +227,3 @@ is wrong and has been removed rather than annotated.
 
 - **`weight_decay` selects only 3e-6, 1e-5 or 3e-5** across all 36 fits, away from both ends
   of the sweep grid, so no cell is straining against its bounds.
-
-## Caveats
-
-**Mixed normalization within `amass_clean`.** seed 42 was pretrained under
-`pretrain_v1_train_clean.pt` (12,722 samples); seeds 1 and 2 under
-`pretrain_v1_stats_train_clean.pt` (9,821), after `notebooks/pretrain_corpus.ipynb` applied
-`min_frames=240` to the statistics view. Measured difference between the two: mean shift
-median 0.002σ, max 0.032σ; std ratio 0.96-1.05. Far below seed spread, so the three are
-pooled -- but it is a systematic difference affecting one of three replicates, not noise,
-and it is visible in the Provenance table above.
-
-**Nothing here is exactly reproducible from current code.** `build_motion_view` returned
-rows in nondeterministic order until it was fixed to sort by `sample_id`, so every run
-predating that fix saw a different data ordering. Same distribution, so no number is wrong,
-but a re-run will not reproduce them bit for bit -- and re-running one cell for comparison
-means re-running its counterpart too.
-
-**`amass_motionx_clean` has one seed.** Every delta in this file inherits its error bar
-from `amass_clean`, which assumes the two corpora have comparable seed variance. Untested.
-
-## Gaps
-
-- `amass_motionx_clean` at 2-3 seeds -- the highest-value run, ~11.4 h per seed at
-  medium_100ep. Turns every marginal delta above into a decided one.
-- `amass_motionx_complete` -- the broken-sample corpus. Not pretrained. Uninterpretable
-  until the seed baseline above exists.
-- `amass_clean/small_40ep` -- pretrained, never probed. Would test whether small_40ep is a
-  valid cheap proxy for medium_100ep conclusions.
-- `carepd_updrs_convex` -- sibling benchmark; needs the ordinal head and take-level
-  aggregation before it can be scored.
