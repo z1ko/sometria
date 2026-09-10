@@ -23,6 +23,7 @@ from argparse import ArgumentParser
 from pathlib import Path
 from types import SimpleNamespace
 
+import lightning as L
 import torch as t
 import torch.nn as nn
 from omegaconf import OmegaConf
@@ -66,6 +67,12 @@ def latest_checkpoint(run: Path) -> Path:
 
 
 def run_probe(config, checkpoint: Path, device: str) -> dict:
+    # The L-BFGS fit is deterministic given features, but the features are not: the
+    # training split draws one random crop per sample per pass, so an unseeded run refits
+    # different data every time. Measured on `in_pk__loss_pk`, that alone moved macro mAP
+    # by ~0.001 -- the same size as the corpus-to-corpus deltas the matrix is used to
+    # compare, which is why this is seeded rather than left to the global RNG.
+    L.seed_everything(config.training.get("seed", 13), workers=True)
     t.set_float32_matmul_precision("high")
     _, num_labels = load_label_vocabulary_index(config.dataloader.root, config.dataloader.label_set)
 

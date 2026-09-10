@@ -37,6 +37,33 @@ BASE=${BASE:-config/pretrain_mae.yaml}
 DATALOADER=${DATALOADER:-config/dataloader/${CORPUS}.yaml}
 SIZE=${SIZE:-config/mae/${ARCH}.yaml}
 
+# Replicates. SEEDS is a space-separated list, not a count, because a count can only ever
+# mean "1..N from scratch" -- a list also expresses "add seed 4 to the three I already
+# have", which is what actually happens once a first pass looks marginal.
+#
+#   ./scripts/pretrain_matrix.sh                  the canonical run, unsuffixed path
+#   SEEDS=7 ./scripts/pretrain_matrix.sh          one replicate  -> .../seed7/<cell>
+#   SEEDS="1 2 3" ./scripts/pretrain_matrix.sh    three          -> .../seed1|2|3/<cell>
+#   SEEDS=$(seq 5) ./scripts/pretrain_matrix.sh   if you did want a count
+#
+# Empty means the canonical run, at whatever seed the base config sets, in the unsuffixed
+# path. That is a named reference point rather than the invisible default this layout
+# otherwise avoids, and it keeps every existing run where it is. An explicit seed
+# overrides training.seed *and* adds a path segment, so a replicate can never quietly
+# overwrite the canonical run.
+#
+# Pretraining-seed spread is the largest unmeasured source of variance in the matrix:
+# every cell is a single run today, so a corpus-to-corpus delta of a few thousandths has
+# nothing to be compared against. Nine runs per seed, so budget accordingly.
+SEEDS=${SEEDS:-}
+if [ -z "$SEEDS" ]; then
+    seeds=("")
+else
+    read -ra seeds <<< "$SEEDS"
+fi
+
+# The base path. The seed segment is appended per replicate below, so overriding RUNS
+# still nests replicates underneath it rather than collapsing them onto each other.
 RUNS=${RUNS:-runs/pretrain/${CORPUS}/${ARCH}_${EPOCHS}ep}
 DRY=${DRY:-}
 
@@ -67,21 +94,28 @@ done_already() {
 echo "corpus     $CORPUS  ($DATALOADER)"
 echo "arch       $ARCH  ($SIZE)"
 echo "epochs     $EPOCHS"
+echo "seeds      ${SEEDS:-<base config default, canonical run>}"
 echo "output     $RUNS"
 echo
 
-for i in "${!names[@]}"; do
-    for j in "${!names[@]}"; do
-        name="in_${names[$i]}__loss_${names[$j]}"
-        out="$RUNS/$name"
-        done_already "$out" && continue
+for seed in "${seeds[@]}"; do
+    root="$RUNS${seed:+/seed$seed}"
+    [ -n "$seed" ] && echo "== seed $seed -> $root"
 
-        echo "train  $name"
-        run "${PYTHON[@]}" train.py \
-            --config "$BASE" "$DATALOADER" "$SIZE" \
-            --output "$out" \
-            "training.epochs=$EPOCHS" \
-            "model.channels_input=${channels[$i]}" \
-            "model.channels_output=${channels[$j]}"
+    for i in "${!names[@]}"; do
+        for j in "${!names[@]}"; do
+            name="in_${names[$i]}__loss_${names[$j]}"
+            out="$root/$name"
+            done_already "$out" && continue
+
+            echo "train  $name"
+            run "${PYTHON[@]}" train.py \
+                --config "$BASE" "$DATALOADER" "$SIZE" \
+                --output "$out" \
+                "training.epochs=$EPOCHS" \
+                ${seed:+"training.seed=$seed"} \
+                "model.channels_input=${channels[$i]}" \
+                "model.channels_output=${channels[$j]}"
+        done
     done
 done

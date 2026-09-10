@@ -246,7 +246,14 @@ def build_motion_view(root: str | Path, spec: MotionViewSpec) -> pl.DataFrame:
         how = "inner" if spec.require_labels else "left"
         df = df.join(labelled_ids, on="sample_id", how=how)
 
-    return df
+    # Polars joins are parallel and do not preserve row order, so two calls with the same
+    # spec return the same *set* of samples in a different sequence. Everything downstream
+    # indexes positionally -- LabelledWindows draws a random crop for sample i, the
+    # pretraining loader shuffles an index range, normalization accumulates in list order --
+    # so without this, seeding the RNG cannot make a run reproducible: the seed picks the
+    # same index, and the index points at a different motion. Measured on the BABEL train
+    # view, row 0 differed between consecutive calls.
+    return df.sort("sample_id")
 
 
 def create_pretrain_split(
