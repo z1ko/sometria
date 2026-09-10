@@ -1,0 +1,18 @@
+dataloader:
+  root: data/processed
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v2_stats_train_clean.pt
+  human: config/human.yaml
+
+  num_workers: 4
+  window_frames: 240
+  batch_size: 200
+  
+  train:
+    source_datasets: ["AMASS", "MotionX"]
+    split_set: pretrain_v2
+    split: train
+  
+  val:
+    source_datasets: ["AMASS"]
+    split_set: babel_official
+    split: val

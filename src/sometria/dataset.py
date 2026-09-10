@@ -154,6 +154,7 @@ class MotionDataModule(L.LightningDataModule):
             split_set=config.dataloader.train.split_set,
             split=config.dataloader.train.split,
             source_datasets=tuple(config.dataloader.train.get("source_datasets", [])),
+            exclude_broken=config.dataloader.train.get("exclude_broken", True),
             min_frames=self.window_frames,
         )
 

@@ -9,13 +9,14 @@ Statistics are saved beside the representation that produced them and passed bac
 channel layout and the training-split statistics change on different clocks.
 """
 
+from dataclasses import asdict
 from pathlib import Path
 
 import polars as pl
 import torch as t
 import tqdm
 
-from sometria.catalog import normalization_path
+from sometria.catalog import MotionViewSpec, normalization_path
 from sometria.representation import Representation
 
 
@@ -109,8 +110,7 @@ def save_feature_normalization(
     samples: pl.DataFrame,
     name: str,
     representation: Representation,
-    split_set: str | None = None,
-    split: str | None = None,
+    spec: MotionViewSpec,
     eps: float = 1e-6,
 ) -> Path:
     """Compute and save normalization stats for a named representation/view."""
@@ -121,11 +121,11 @@ def save_feature_normalization(
         representation=representation,
         eps=eps,
     )
+
     stats |= {
         "name": name,
         "representation": representation.name,
-        "split_set": split_set,
-        "split": split,
+        "view": asdict(spec),
     }
 
     path = normalization_path(output_root, representation.name, name)

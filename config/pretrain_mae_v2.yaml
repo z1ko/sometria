@@ -5,7 +5,7 @@
 dataloader:
   root: data/processed
   human: config/human.yaml
-  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v2_train_clean.pt
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v2_stats_train_clean.pt
   num_workers: 4
   window_frames: 240
   batch_size: 200

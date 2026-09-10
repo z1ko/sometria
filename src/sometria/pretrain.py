@@ -58,7 +58,11 @@ def pretrain(config: DictConfig, output: Path) -> None:
             # zero by collapsing, so the epochs worth probing are exactly the ones after
             # it stops improving. Unmonitored, this one saves every epoch and last.ckpt is
             # the final weights, as the name says.
-            ModelCheckpoint(save_top_k=1, save_last=True, filename="latest"),
+            #
+            # save_top_k=0: this used to be 1 with filename="latest", which wrote a
+            # latest.ckpt that no reader anywhere referenced and that was byte-identical to
+            # last.ckpt on every completed run. save_last still writes the final weights.
+            ModelCheckpoint(save_top_k=0, save_last=True),
         ],
         logger=CSVLogger(
             save_dir=output,

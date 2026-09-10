@@ -43,7 +43,14 @@ def train(config: DictConfig, output: Path):
                 save_top_k=1,
                 save_last=False,
             ),
-            ModelCheckpoint(save_top_k=1, save_last=True, filename="latest"),
+            # last.ckpt is a *separate* callback on purpose. Lightning >=2.5 only writes it
+            # when top-k saved on the same step, so a monitored callback owning both freezes
+            # last.ckpt at the last epoch the monitor improved -- measured, not assumed: with
+            # a monitor that stops improving at epoch 0, a single merged callback leaves
+            # last.ckpt at epoch 0 while this pair leaves it at the final weights.
+            # save_top_k=0 because the top-k file this used to write ("latest.ckpt") was a
+            # byte-identical third copy that nothing reads.
+            ModelCheckpoint(save_top_k=0, save_last=True),
         ],
         logger=CSVLogger(save_dir=output),
     )
