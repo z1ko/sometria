@@ -55,6 +55,12 @@ def train(config: DictConfig, output: Path):
         logger=CSVLogger(save_dir=output),
     )
     trainer.fit(model, datamodule=datamodule)
+    # Written only once fit returns, so it means "this finished" and nothing weaker.
+    # config.yaml cannot carry that meaning -- it is written before training starts, so a
+    # run that died in its first validation batch looked complete to the sweep scripts and
+    # was skipped on every retry. Observed: three dec_dim runs crashed at sanity-check and
+    # silently stayed crashed.
+    (Path(output) / "done").touch()
     return trainer, model
 
 

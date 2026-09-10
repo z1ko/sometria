@@ -21,6 +21,13 @@
 # (different label_set and splits), so pass both:
 #
 #   BENCHMARK=carepd_updrs_convex CONFIG=config/experiment_probe_carepd.yaml ...
+#
+# SPLIT_SET overrides both sides of the config's split and adds itself to the output path.
+# For CARE-PD the split set *is* the evaluation protocol -- within-site, cross-site, LODO
+# and MIDA differ in nothing else -- so this is how a protocol gets run:
+#
+#   SPLIT_SET=carepd_lodo_BMCLab BENCHMARK=carepd_updrs_convex \
+#     CONFIG=config/experiment_probe_carepd.yaml ./scripts/probe_matrix.sh
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -58,8 +65,11 @@ if [ -z "$SEEDS" ]; then seeds=(""); else read -ra seeds <<< "$SEEDS"; fi
 if [ -z "$REPEATS" ]; then repeats=(""); else read -ra repeats <<< "$REPEATS"; fi
 
 # Base paths; seed and repeat segments are appended per combination below.
+SPLIT_SET=${SPLIT_SET:-}
 PRETRAIN=${PRETRAIN:-runs/pretrain/${CORPUS}/${ARCH}_${EPOCHS}ep}
-OUT=${OUT:-runs/probe/${BENCHMARK}/${CORPUS}/${ARCH}_${EPOCHS}ep}
+# The split set joins the path rather than only the config, so two protocols scored from
+# the same checkpoint do not overwrite each other's metrics.json.
+OUT=${OUT:-runs/probe/${BENCHMARK}${SPLIT_SET:+/$SPLIT_SET}/${CORPUS}/${ARCH}_${EPOCHS}ep}
 DRY=${DRY:-}
 
 for config in "$CONFIG" "$DATALOADER"; do
@@ -98,6 +108,7 @@ echo "arch       $ARCH"
 echo "epochs     $EPOCHS"
 echo "seeds      ${SEEDS:-<canonical pretraining run>}"
 echo "repeats    ${REPEATS:-<none, probe seed from config>}"
+echo "split set  ${SPLIT_SET:-<from $CONFIG>}"
 echo "read       $PRETRAIN"
 echo "write      $OUT"
 echo
@@ -130,6 +141,8 @@ for seed in "${seeds[@]}"; do
                 --config "$CONFIG" \
                 --output "$out" \
                 "dataloader.normalization=$NORMALIZATION" \
+                ${SPLIT_SET:+"dataloader.train.split_set=$SPLIT_SET"} \
+                ${SPLIT_SET:+"dataloader.val.split_set=$SPLIT_SET"} \
                 ${repeat:+"training.seed=$repeat"}
         done
     done

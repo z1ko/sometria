@@ -110,30 +110,47 @@ class Decoder(nn.Module):
         depth: int,
         heads: int,
         mlp_ratio: int,
+        dec_dim: int | None = None,
     ) -> None:
         super().__init__()
 
         self.num_dofs = num_dofs
 
-        self.proj = nn.Linear(dim, num_frames_in_patch * len(channels_output))
-        self.blocks = _encode_layers(dim, heads, mlp_ratio, depth)
+        # How much of the reconstruction the decoder can absorb decides how much of it the
+        # encoder has to carry. MAE (He et al., Table 1a) narrows the decoder to half the
+        # encoder width for exactly this reason; ours defaults to full width, and with
+        # mask_ratio 0.9 the decoder also runs over all 1290 tokens where the encoder sees
+        # 128 -- 8.6x the encoder's FLOPs. Set this below `dim` to weaken it.
+        width = dim if dec_dim is None else dec_dim
+        # Identity, not Linear, when the widths match: it holds no parameters, so every
+        # checkpoint written before this argument existed still loads key for key.
+        self.embed = nn.Identity() if width == dim else nn.Linear(dim, width)
+
+        self.proj = nn.Linear(width, num_frames_in_patch * len(channels_output))
+        self.blocks = _encode_layers(width, heads, mlp_ratio, depth)
 
         # Target tokens to generate
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, dim))
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, width))
         nn.init.trunc_normal_(self.mask_token, std=0.02)
 
         # Positional embeddings
-        self.pos_s = nn.Parameter(torch.zeros(1, 1, num_dofs, dim))
+        self.pos_s = nn.Parameter(torch.zeros(1, 1, num_dofs, width))
         nn.init.trunc_normal_(self.pos_s, std=0.02)
-        self.pos_t = nn.Parameter(torch.zeros(1, max_te, 1, dim))
+        self.pos_t = nn.Parameter(torch.zeros(1, max_te, 1, width))
         nn.init.trunc_normal_(self.pos_t, std=0.02)
 
     def forward(self, h: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
 
+        h = self.embed(h)
         B, _, D = h.shape
         pos = (self.pos_s + self.pos_t).flatten(1, 2)
 
-        x = self.mask_token.expand(B, pos.size(1), D).clone()
+        # `.to(h.dtype)` because scatter demands both sides share a dtype, and under AMP
+        # they otherwise do not: a transformer block ends in a LayerNorm, which autocast
+        # keeps in fp32, so an Identity `embed` hands back fp32 and matches the parameters
+        # -- but a Linear `embed` is on autocast's bf16 list and hands back bf16. Without
+        # this, any dec_dim != dim dies in the first validation batch.
+        x = self.mask_token.expand(B, pos.size(1), D).to(h.dtype).clone()
         x = x.scatter(1, keep.unsqueeze(-1).expand(-1, -1, D), h)
 
         return self.proj(self.blocks(x + pos))
@@ -156,6 +173,9 @@ class MAE(L.LightningModule):
         channels_output: tuple[int, ...] = (0, 1, 2, 3, 4),
         num_heads: int = 8,
         dim: int = 256,
+        # None means "as wide as the encoder", which is what every run before this knob
+        # existed used, so an old checkpoint's hparams reproduce its architecture.
+        dec_dim: int | None = None,
         lr: float = 1e-3,
     ) -> None:
         
@@ -175,7 +195,10 @@ class MAE(L.LightningModule):
         self.num_tokens = Te * num_dofs
 
         self.encoder = Encoder(num_dofs, num_frames_in_patch, dim, enc_depth, num_heads, channels_input, mlp_ratio, Te)
-        self.decoder = Decoder(num_dofs, num_frames_in_patch, Te, channels_output, dim, dec_depth, num_heads, mlp_ratio)
+        self.decoder = Decoder(
+            num_dofs, num_frames_in_patch, Te, channels_output, dim, dec_depth, num_heads,
+            mlp_ratio, dec_dim,
+        )
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """x: (B, T, V, C) with full channels -> (B, N, E)"""

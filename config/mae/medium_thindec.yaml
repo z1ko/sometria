@@ -1,0 +1,17 @@
+# `medium` with a deliberately weakened decoder, for the decoder-capacity ablation.
+#
+# The default `medium` decoder does 8.6x the encoder's FLOPs: dec_depth 3 at full width,
+# and with mask_ratio 0.90 it runs over all 1290 tokens while the encoder sees 128. MAE
+# (He et al.) runs at 0.35x. A decoder that strong can absorb the reconstruction task on
+# its own, which is the hypothesis for why swapping the loss channels between `pk` and
+# `pkd` moves the frozen probe by +0.0013 while `p` -> `pk` moves it by +0.0137.
+#
+# dec_depth 1 + dec_dim 128 puts the decoder at ~1.0x the encoder's FLOPs, an 8x cut.
+# Expect probe scores to drop for both cells (MAE Table 1a: linear probing improves with
+# decoder depth); the question is whether the *gap between* the cells opens.
+model:
+  dim: 256
+  enc_depth: 6
+  dec_depth: 1
+  dec_dim: 128
+  num_heads: 8

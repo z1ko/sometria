@@ -1,0 +1,118 @@
+# CARE-PD UPDRS gait probe: frozen backbone, mean pool, convex head. The BABEL probe's
+# twin, differing only where the benchmark differs. Run it through scripts/probe_matrix.sh:
+#
+#   BENCHMARK=carepd_updrs_convex CONFIG=config/experiment_probe_carepd.yaml \
+#     CORPUS=amass_clean ./scripts/probe_matrix.sh
+#
+# Six things are not the BABEL settings, and each is a decision rather than a port:
+#
+# 1. `window_frames: 120`. CARE-PD takes are seconds of walking, not a mocap session. At
+#    240 frames `carepd_fixed/train` loses 2287 -> 1650 samples to `min_frames`; at 120 it
+#    loses 38. The backbone sees 15 patches instead of 30, which mean pooling handles, but
+#    it is off-distribution from pretraining -- so this is the knob to revisit first if the
+#    probe underperforms.
+#
+# 2. `exclude_broken: false`, on both splits. TAU_RATE_MAX is five robust sigmas above
+#    AMASS's median torque rate; PD-GaM was captured at 25 Hz and its median lands within a
+#    factor of two of that, so the filter cuts that cohort near its own median. Cohorts are
+#    not balanced across severity, so the surviving class distribution is not the released
+#    one -- a filtered run is not scoring CARE-PD's benchmark. Set it true only to measure
+#    what the filter costs, never to report.
+#
+# 3. `split: eval`, not `val`. CARE-PD publishes one held-out side and names it that;
+#    renaming it val or test would assert a three-way protocol the release does not have.
+#
+# 4. Participant-level splits, and the split set is the whole protocol. Every CARE-PD
+#    protocol is materialized as a named split set by `import_carepd_folds`, so switching
+#    from within-site to cross-site is one override and nothing else changes:
+#
+#      carepd_<cohort>_loso_<k>        within-dataset LOSO, the paper's headline (110)
+#      carepd_<cohort>_6fold_<k>       6-fold participant CV                      (24)
+#      carepd_<cohort>_fixed           the release's fixed split                   (4)
+#      carepd_cross_<x>_to_<y>         train on x, test on y                      (12)
+#      carepd_lodo_<x>                 train on the other three, test on x         (4)
+#      carepd_mida_<x>_loso_<k>        LODO plus x's own LOSO train split        (110)
+#      carepd_fixed, carepd_6fold_<k>  ours: the four cohorts pooled
+#
+#    The default below is BMCLab's fixed split -- one cheap run on the cohort the paper
+#    tuned its own hyperparameters on. The pooled sets are ours, not the paper's, and every
+#    cohort appears on both sides of them; cohort priors differ enough (T-SDU-PD is 44%
+#    score-2 against PD-GaM's 15%) that a probe can score by recognizing the capture site.
+#
+#    Never split takes -- a patient contributes many walks, so a take-level split scores
+#    patient identity, not severity.
+#
+# 5. Four classes, with the rare one excluded from the *metric* and not from the data.
+#    That is the paper's rule (S4.3): "all score-3 samples remain in the training folds;
+#    the exclusion applies only to the metric". Score 3 is 45 takes and often absent from a
+#    training fold, so a classifier that cannot predict it scores F1 0 for that class and
+#    deflates the macro average -- hence `f1_label_subsets` reporting both 0-3 and 0-2 from
+#    one model. Dropping the samples instead would score an easier benchmark under the same
+#    name: a true-3 take predicted as 2 has to keep counting against class 2.
+#
+# 6. `pool_val_by_take: true`. One UPDRS score per walk, so the walk is what the metric
+#    counts; left per-window, a 40 s take votes ten times against a 4 s take's once.
+
+dataloader:
+  root: data/processed
+  human: config/human.yaml
+  # Overridden by probe_matrix.sh with whatever the pretraining corpus normalized under.
+  # The backbone is frozen: mismatched statistics offset every feature, silently.
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_stats_train_clean.pt
+  batch_size: 32
+  num_workers: 4
+  window_frames: 120
+  label_set: carepd_updrs_gait
+  # One sequence annotation spanning 0..duration, so every window is fully covered and
+  # the threshold never binds. Kept explicit so it is clear it is inert here, not tuned.
+  label_min_coverage: 0.15
+
+  train:
+    split_set: carepd_BMCLab_fixed
+    split: train
+    source_datasets: ["CARE-PD"]
+    label_sources: ["CARE-PD"]
+    exclude_broken: false
+
+  val:
+    split_set: carepd_BMCLab_fixed
+    split: eval
+    source_datasets: ["CARE-PD"]
+    label_sources: ["CARE-PD"]
+    exclude_broken: false
+
+# Only read when `model.checkpoint` is null; a pretrained backbone carries its own spec in
+# the checkpoint hparams. Kept matching the pretraining config so the random-init control
+# stays the same architecture as what it controls for.
+encoder:
+  num_dofs: 43
+  num_features: 5
+  patch_size: 8
+  window_frames: 120
+  d_model: 256
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+model:
+  name: classifier
+  checkpoint: null       # set by probe_convex_mae.py --checkpoint
+  encoder: teacher
+  pool: mean             # convex probe accepts "mean" | "mean_max" only
+  lr: 0.001
+
+training:
+  seed: 13
+  # One UPDRS score per walk, so the walk is the unit the metric counts. Also selects the
+  # weight decay on the pooled numbers, which is the point -- the decay that is best per
+  # window is not the one that is best per take.
+  pool_val_by_take: true
+  # The paper's macro F1, reported beside our mAP rather than replacing it. Each family
+  # pools the way it has to: mAP over mean probabilities, F1 over the majority vote.
+  f1_label_subsets: [[0, 1, 2, 3], [0, 1, 2]]
+  epochs: 20
+  monitor: val/macro_map
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  overfit_batches: 0

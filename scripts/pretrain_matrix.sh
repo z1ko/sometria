@@ -55,6 +55,13 @@ SIZE=${SIZE:-config/mae/${ARCH}.yaml}
 # Pretraining-seed spread is the largest unmeasured source of variance in the matrix:
 # every cell is a single run today, so a corpus-to-corpus delta of a few thousandths has
 # nothing to be compared against. Nine runs per seed, so budget accordingly.
+# Which of the nine cells to run. Empty means all of them; a space-separated list of
+# in_<x>__loss_<y> names runs only those, which is what an ablation aimed at one row of
+# the matrix wants rather than eight runs it will not read.
+#
+#   CELLS="in_pk__loss_pk in_pk__loss_pkd" ./scripts/pretrain_matrix.sh
+CELLS=${CELLS:-}
+
 SEEDS=${SEEDS:-}
 if [ -z "$SEEDS" ]; then
     seeds=("")
@@ -85,7 +92,11 @@ run() {
 }
 
 done_already() {
-    [ -e "$1/config.yaml" ] && { echo "skip   $1"; return 0; }
+    # The marker train.py writes *after* fit returns, not config.yaml, which it writes
+    # before training starts. Keying on the config meant a run that crashed at startup
+    # left a directory that looked finished and was skipped on every retry -- and a run
+    # killed mid-training was skipped at whatever epoch it reached.
+    [ -e "$1/done" ] && { echo "skip   $1"; return 0; }
     return 1
 }
 
@@ -94,6 +105,7 @@ done_already() {
 echo "corpus     $CORPUS  ($DATALOADER)"
 echo "arch       $ARCH  ($SIZE)"
 echo "epochs     $EPOCHS"
+echo "cells      ${CELLS:-<all nine>}"
 echo "seeds      ${SEEDS:-<base config default, canonical run>}"
 echo "output     $RUNS"
 echo
@@ -105,6 +117,7 @@ for seed in "${seeds[@]}"; do
     for i in "${!names[@]}"; do
         for j in "${!names[@]}"; do
             name="in_${names[$i]}__loss_${names[$j]}"
+            if [ -n "$CELLS" ] && [[ " $CELLS " != *" $name "* ]]; then continue; fi
             out="$root/$name"
             done_already "$out" && continue
 

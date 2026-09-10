@@ -24,6 +24,7 @@ from sometria.downstream.labels import (
     LABEL_MIN_COVERAGE,
     annotated_sample_ids,
     load_label_segments,
+    load_label_vocabulary_index,
     window_multi_hot,
     window_patch_labels,
 )
@@ -136,6 +137,11 @@ class LabelledMotionDataModule(L.LightningDataModule):
         self.window_frames = loader.get("window_frames", 240)
         self.label_set = loader.label_set
         self.min_coverage = loader.get("label_min_coverage", LABEL_MIN_COVERAGE)
+        # Which ontology counts as "annotated" follows the label set, and is not
+        # act_cat for every benchmark: CARE-PD's scores are `updrs_gait`. Hardcoding
+        # the BABEL default here filtered every CARE-PD sample out of the view and
+        # produced an empty dataset rather than an error.
+        self.ontology = load_label_vocabulary_index(self.root_folder, self.label_set)[0]["ontology"][0]
         # Set for segmentation, absent for classification. It belongs to the loader
         # rather than the model because it changes the shape of the target.
         self.label_patches = loader.get("label_patches")
@@ -146,6 +152,14 @@ class LabelledMotionDataModule(L.LightningDataModule):
         # all-negative windows.
         label_types = loader.get("label_types")
         self.label_types = None if label_types is None else tuple(label_types)
+        # Whether a sample with no in-vocabulary label is a negative or is out of scope.
+        # False is right for BABEL: `transition` is 19% of rows and has no index, so a
+        # window covering only it trains as all-negative, and dropping it would bias the
+        # benchmark toward segments that happen to carry a scoreable label. True is right
+        # for a single-label benchmark that trims its vocabulary -- CARE-PD's score-3
+        # takes are 1% of the corpus and, left in, are not "none of the above", they are
+        # a class the head was told to stop predicting.
+        self.require_in_vocabulary = loader.get("require_in_vocabulary", False)
 
         normalization = loader.get("normalization")
         if normalization is None:
@@ -161,12 +175,19 @@ class LabelledMotionDataModule(L.LightningDataModule):
         self.val_spec = self._spec(loader.val)
 
     def _spec(self, split: DictConfig) -> MotionViewSpec:
+        # exclude_broken defaults on, as everywhere else, but has to be reachable per
+        # benchmark: TAU_RATE_MAX was calibrated as five robust sigmas above AMASS's
+        # median torque rate, and on a 25 Hz clinical capture it cuts near that cohort's
+        # own median. Dropping is then a coin flip rather than a quality signal, and
+        # because cohorts are not balanced across severity it moves the class
+        # distribution -- a filtered CARE-PD run is not scoring CARE-PD's benchmark.
         return MotionViewSpec(
             split_set=split.split_set,
             split=split.split,
             source_datasets=tuple(split.get("source_datasets", [])),
             label_sources=tuple(split.get("label_sources", ["BABEL"])),
             require_labels=True,
+            exclude_broken=split.get("exclude_broken", True),
             min_frames=self.window_frames,
         )
 
@@ -180,7 +201,9 @@ class LabelledMotionDataModule(L.LightningDataModule):
     def _windows(self, spec: MotionViewSpec, *, tiles: bool) -> LabelledWindows:
         samples = build_motion_view(self.root_folder, spec).filter(
             pl.col("sample_id").is_in(
-                annotated_sample_ids(self.root_folder, label_types=self.label_types)
+                annotated_sample_ids(
+                    self.root_folder, self.ontology, label_types=self.label_types
+                )
             )
         )
         segments, num_labels = load_label_segments(
@@ -190,6 +213,14 @@ class LabelledMotionDataModule(L.LightningDataModule):
             **({} if self.label_types is None else {"label_types": self.label_types}),
         )
         self.num_labels = num_labels
+
+        if self.require_in_vocabulary:
+            samples = samples.filter(pl.col("sample_id").is_in(list(segments)))
+            if samples.is_empty():
+                raise ValueError(
+                    f"no sample in {spec.split_set}/{spec.split} carries a label in "
+                    f"{self.label_set!r}; check the vocabulary and label_sources"
+                )
 
         return LabelledWindows(
             MotionDataset(

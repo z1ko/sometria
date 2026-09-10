@@ -1,0 +1,14 @@
+{
+  "cka": {
+    "title": "Do the two cells even produce different encoders?",
+    "result": "linear CKA between mean-pooled features, on 10,275 CARE-PD windows: 0.934 \u00b10.007 for same seed / different loss term (n=3), against 0.959 \u00b10.005 for same loss term / different seed (n=6)",
+    "note": "The torque target is not inert -- it moves the representation about 1.6x further than a seed does, and the two sets do not overlap. So the null at 8.5x decoder is not 'the encoders are identical'; it is 'the difference is real and the mean-pool linear probe cannot read it'. Measured on medium_100ep/amass_clean before the thindec runs existed, which is why it is stated against that arch only.",
+    "command": "linear CKA over MotionConvexClassifier pooled features; see git history for the throwaway script"
+  },
+  "tau_recoverable": {
+    "title": "How much of tau is a function of the channels the encoder already sees",
+    "result": "variance-weighted R\u00b2 = 0.677 from a *linear* map of (sin, cos, vel, acc), on 12,000 frames from 60 AMASS takes",
+    "note": "A lower bound: inverse dynamics is tau = M(q)qdd + C(q,qd)qd + G(q) - J^T F_ext, and linear regression cannot represent the bilinear M(q)qdd term. So the extra reconstruction target asks for something largely computable from what the encoder must already encode, which is what a large decoder can absorb.",
+    "command": "uv run python results/decoder_capacity/gen.py --measure"
+  }
+}

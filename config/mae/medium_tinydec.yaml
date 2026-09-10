@@ -1,0 +1,12 @@
+# The second rung of the decoder-capacity ablation -- see medium_thindec.yaml.
+#
+# dec_depth 1 + dec_dim 64 puts the decoder at ~0.4x the encoder's FLOPs, which is roughly
+# where MAE's own default sits (0.35x). Two rungs rather than one because a dose-response
+# is evidence and a single point is an anecdote: if weakening the decoder is what opens
+# the pk/pkd gap, the gap should widen monotonically from medium to thindec to tinydec.
+model:
+  dim: 256
+  enc_depth: 6
+  dec_depth: 1
+  dec_dim: 64
+  num_heads: 8

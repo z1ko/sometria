@@ -98,8 +98,21 @@ def run_probe(config, checkpoint: Path, device: str) -> dict:
         max_iter=config.training.get("max_iter", 200),
         tol=config.training.get("tol", 1e-7),
         train_passes=config.training.get("train_passes", DEFAULT_TRAIN_PASSES),
+        # Off unless the benchmark's label is a property of the whole take. On BABEL it
+        # is not -- the label varies within a take, which is why the take is windowed at
+        # all -- so this stays a per-benchmark config key rather than a default.
+        by_sample=config.training.get("pool_val_by_take", False),
+        # CARE-PD reports macro F1 over all four scores and again excluding the rare 3,
+        # from the same model -- the exclusion is an averaging choice, not a data filter.
+        # Empty means "our mAP numbers only", which is right for BABEL's multi-hot targets.
+        f1_subsets=[list(subset) for subset in config.training.get("f1_label_subsets", [])],
     )
-    return {"weight_decay": best_wd, "metrics": best_metrics, "sweep": all_metrics}
+    return {
+        "weight_decay": best_wd,
+        "metrics": best_metrics,
+        "sweep": all_metrics,
+        "pooled_by_take": bool(config.training.get("pool_val_by_take", False)),
+    }
 
 
 def main() -> None:

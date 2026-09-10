@@ -1,0 +1,26 @@
+{
+  "source": "Adeli et al., CARE-PD: A Multi-Site Anonymized Clinical Dataset for Parkinson's Disease Gait Assessment, NeurIPS 2025. paper/references/CarePD.pdf",
+  "metric": "macro F1 over UPDRS-gait labels 0-3, take level",
+  "caveat": "Transcribed from the paper, not measured here -- the only numbers in this folder that are. Their pipeline differs from ours in ways no protocol match can remove: SMPL meshes resampled to 30 Hz against our 60 Hz OpenSim joint kinematics and torques, and an AdamW head with a tuned learning rate, epoch budget and loss type against our convex L-BFGS. Read these as the band a purpose-built motion encoder reaches, not as a target we are trying to hit exactly.",
+  "within_dataset_loso": {
+    "table": "D.2, mean +- SD over the seven encoders",
+    "3DGait": {"mean": 0.271, "sd": 0.082},
+    "BMCLab": {"mean": 0.559, "sd": 0.136},
+    "PD-GaM": {"mean": 0.620, "sd": 0.056},
+    "T-SDU-PD": {"mean": 0.417, "sd": 0.052}
+  },
+  "cross_dataset": {
+    "table": "D.2, mean +- SD over the seven encoders, by target cohort",
+    "3DGait": {"mean": 0.287, "sd": 0.108},
+    "BMCLab": {"mean": 0.276, "sd": 0.123},
+    "PD-GaM": {"mean": 0.289, "sd": 0.112},
+    "T-SDU-PD": {"mean": 0.290, "sd": 0.120}
+  },
+  "lodo": {
+    "table": "read off the Fig. 4a heatmap, so ranges only -- no per-model table is published",
+    "3DGait": {"low": 0.11, "high": 0.43},
+    "BMCLab": {"low": 0.26, "high": 0.50},
+    "PD-GaM": {"low": 0.36, "high": 0.55},
+    "T-SDU-PD": {"low": 0.13, "high": 0.49}
+  }
+}
