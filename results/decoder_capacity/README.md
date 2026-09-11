@@ -37,33 +37,33 @@ uv run python results/decoder_capacity/gen.py --measure   # also refresh evidenc
 
 ## Does weakening the decoder widen the loss-channel gap?
 
-| arch | input | `medium` gap | this gap | change | sd | t |
-| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
-| `medium_thindec` | `in_p` | -0.0015 | +0.0057 | **+0.0071** | 0.0106 | 1.17 |
-| `medium_thindec` | `in_pk` | +0.0013 | +0.0070 | **+0.0057** | 0.0038 | 2.58 |
-| `medium_thindec` | `in_pkd` | +0.0026 | +0.0036 | **+0.0010** | 0.0102 | 0.17 |
-| `medium_thindec` | **all rows** | | | **+0.0046** | 0.0081 | **1.71** | 
+| arch | input | `medium` gap | this gap | change | sd | t | p | verdict |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| `medium_thindec` | `in_p` | -0.0015 | +0.0057 | **+0.0071** | 0.0106 | 1.17 | 0.362 | not significant |
+| `medium_thindec` | `in_pk` | +0.0013 | +0.0070 | **+0.0057** | 0.0038 | 2.58 | 0.123 | not significant |
+| `medium_thindec` | `in_pkd` | +0.0026 | +0.0036 | **+0.0010** | 0.0102 | 0.17 | 0.882 | not significant |
+| `medium_thindec` | **all rows** | | | **+0.0046** | 0.0081 | **1.71** | 0.126 | not significant |
 
-*This is the hypothesis test. `|t| > 2` is marginal at three seeds; the per-row numbers have two degrees of freedom each, so read the pooled row first.*
+*This is the hypothesis test. `p` is two-sided at that row's own degrees of freedom, which is why it is reported instead of a bare `t`: with three seeds the 0.05 bar is |t| > 4.30, not the ~2 most readers carry around. Per-row verdicts are Bonferroni-corrected over the three input rows; the pooled row is those three together, not a fourth test.*
 
 ## The gap itself, per architecture and input row
 
-| decoder / encoder | arch | input | seeds | `loss_pk` | `loss_pkd` | gap | t |
-| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
-| 8.6× | `medium` | `in_p` | 3 | 0.3627 ±0.0036 | 0.3612 ±0.0003 | **-0.0015** | -0.68 |
-| 8.6× | `medium` | `in_pk` | 3 | 0.3645 ±0.0011 | 0.3658 ±0.0012 | **+0.0013** | 10.14 |
-| 8.6× | `medium` | `in_pkd` | 3 | 0.3577 ±0.0023 | 0.3603 ±0.0032 | **+0.0026** | 1.28 |
-| 1.0× | `medium_thindec` | `in_p` | 3 | 0.3566 ±0.0075 | 0.3623 ±0.0026 | **+0.0057** | 1.08 |
-| 1.0× | `medium_thindec` | `in_pk` | 3 | 0.3533 ±0.0007 | 0.3604 ±0.0039 | **+0.0070** | 3.40 |
-| 1.0× | `medium_thindec` | `in_pkd` | 3 | 0.3499 ±0.0023 | 0.3535 ±0.0045 | **+0.0036** | 0.92 |
-| 0.4× | `medium_tinydec` | `in_pk` | 1 | 0.3410 | 0.3569 | **+0.0159** | -- |
+| decoder / encoder | arch | input | seeds | `loss_pk` | `loss_pkd` | gap | t | p |
+| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8.6× | `medium` | `in_p` | 3 | 0.3627 ±0.0036 | 0.3612 ±0.0003 | **-0.0015** | -0.68 | 0.564 |
+| 8.6× | `medium` | `in_pk` | 3 | 0.3645 ±0.0011 | 0.3658 ±0.0012 | **+0.0013** | 10.14 | 0.010 |
+| 8.6× | `medium` | `in_pkd` | 3 | 0.3577 ±0.0023 | 0.3603 ±0.0032 | **+0.0026** | 1.28 | 0.328 |
+| 1.0× | `medium_thindec` | `in_p` | 3 | 0.3566 ±0.0075 | 0.3623 ±0.0026 | **+0.0057** | 1.08 | 0.394 |
+| 1.0× | `medium_thindec` | `in_pk` | 3 | 0.3533 ±0.0007 | 0.3604 ±0.0039 | **+0.0070** | 3.40 | 0.077 |
+| 1.0× | `medium_thindec` | `in_pkd` | 3 | 0.3499 ±0.0023 | 0.3535 ±0.0045 | **+0.0036** | 0.92 | 0.453 |
+| 0.4× | `medium_tinydec` | `in_pk` | 1 | 0.3410 | 0.3569 | **+0.0159** | -- | -- |
 
 ## What the weaker decoder costs
 
-| arch | pairs | mean Δ vs `medium` | sd | t | wins |
-| :--- | ---: | ---: | ---: | ---: | ---: |
-| `medium_thindec` | 27 | **-0.0049** | 0.0061 | -4.19 | 10/27 |
-| `medium_tinydec` | 2 | **-0.0149** | 0.0105 | -2.02 | 0/2 |
+| arch | pairs | mean Δ vs `medium` | sd | t | p | wins | verdict |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| `medium_thindec` | 27 | **-0.0049** | 0.0061 | -4.19 | <0.001 | 10/27 | **p < 0.05** |
+| `medium_tinydec` | 2 | **-0.0149** | 0.0105 | -2.02 | 0.293 | 0/2 | not significant |
 
 *Every cell and seed the two architectures share. A negative mean is a worse model, whatever the gap does.*
 

@@ -20,49 +20,51 @@ uv run python results/probe/babel_60_convex/gen.py
 
 *65 cells across 2 corpora. Regenerate with `gen.py`.*
 
+*In the matrices, the percentage beside each cell is its relative difference from the best cell of that table: `(cell - best) / best`. It is within-table only, so it compares cells to each other and never across corpora or architectures.*
+
 ## Macro mAP
 
 ### `amass_clean` / medium_100ep (3 seeds)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
-| **p** | 0.3463 ±0.0015 | 0.3627 ±0.0036 | 0.3612 ±0.0003 |
-| **pk** | 0.3508 ±0.0055 | 0.3645 ±0.0011 | **0.3658** ±0.0012 |
-| **pkd** | 0.3486 ±0.0038 | 0.3577 ±0.0023 | 0.3603 ±0.0032 |
+| **p** | 0.3463 ±0.0015 (-5.3%) | 0.3627 ±0.0036 (-0.9%) | 0.3612 ±0.0003 (-1.3%) |
+| **pk** | 0.3508 ±0.0055 (-4.1%) | 0.3645 ±0.0011 (-0.4%) | **0.3658** ±0.0012 (+0.0%) |
+| **pkd** | 0.3486 ±0.0038 (-4.7%) | 0.3577 ±0.0023 (-2.2%) | 0.3603 ±0.0032 (-1.5%) |
 
 ### `amass_clean` / medium_thindec_100ep (3 seeds)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
-| **p** | 0.3426 ±0.0089 | 0.3566 ±0.0075 | **0.3623** ±0.0026 |
-| **pk** | 0.3498 ±0.0042 | 0.3533 ±0.0007 | 0.3604 ±0.0039 |
-| **pkd** | 0.3450 ±0.0049 | 0.3499 ±0.0023 | 0.3535 ±0.0045 |
+| **p** | 0.3426 ±0.0089 (-5.4%) | 0.3566 ±0.0075 (-1.6%) | **0.3623** ±0.0026 (+0.0%) |
+| **pk** | 0.3498 ±0.0042 (-3.5%) | 0.3533 ±0.0007 (-2.5%) | 0.3604 ±0.0039 (-0.5%) |
+| **pkd** | 0.3450 ±0.0049 (-4.8%) | 0.3499 ±0.0023 (-3.4%) | 0.3535 ±0.0045 (-2.4%) |
 
 ### `amass_clean` / medium_tinydec_100ep (1 seed, no error bar)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
 | **p** | -- | -- | -- |
-| **pk** | -- | 0.3410 | **0.3569** |
+| **pk** | -- | 0.3410 (-4.5%) | **0.3569** (+0.0%) |
 | **pkd** | -- | -- | -- |
 
 ### `amass_motionx_clean` / medium_100ep (1 seed, no error bar)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
-| **p** | 0.3470 | 0.3613 | 0.3609 |
-| **pk** | 0.3508 | **0.3714** | 0.3620 |
-| **pkd** | 0.3543 | 0.3628 | 0.3568 |
+| **p** | 0.3470 (-6.6%) | 0.3613 (-2.7%) | 0.3609 (-2.8%) |
+| **pk** | 0.3508 (-5.5%) | **0.3714** (+0.0%) | 0.3620 (-2.5%) |
+| **pkd** | 0.3543 (-4.6%) | 0.3628 (-2.3%) | 0.3568 (-3.9%) |
 
-### Delta, `amass_motionx_clean` − `amass_clean`
+### Delta, `amass_motionx_clean` − `amass_clean` (medium_100ep)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
-| **p** | +0.0025 (+0.5σ) | +0.0017 (+0.3σ) | -0.0009 (-0.2σ) |
-| **pk** | +0.0005 (+0.1σ) | +0.0150 (+2.8σ) | -0.0002 (-0.0σ) |
-| **pkd** | +0.0075 (+1.4σ) | +0.0090 (+1.6σ) | -0.0002 (-0.0σ) |
+| **p** | +0.0007 (+0.2σ) | -0.0014 (-0.5σ) | -0.0003 (-0.1σ) |
+| **pk** | +0.0000 (+0.0σ) | +0.0069 (+2.4σ) | -0.0038 (-1.3σ) |
+| **pkd** | +0.0057 (+2.0σ) | +0.0051 (+1.7σ) | -0.0036 (-1.2σ) |
 
-*σ = 0.0051 pooled over cells; n = 7 vs 1, so SE = 0.0054, σ borrowed from `amass_clean`. |z| > 2 is marginal; Bonferroni over the 9 cells needs |z| > 2.77.*
+*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0025 is the seed spread pooled over cells; with n = 3 vs 1 runs the difference of two means has SE = 0.0029, σ borrowed from `amass_clean`, so 1σ here = 0.0029 Macro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 9-cell matrix and picking the largest needs |z| > 2.77 to keep the same 5% false-positive rate over the table.*
 
 ## Micro mAP
 
@@ -70,43 +72,72 @@ uv run python results/probe/babel_60_convex/gen.py
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
-| **p** | 0.5310 ±0.0027 | 0.5512 ±0.0040 | 0.5498 ±0.0018 |
-| **pk** | 0.5432 ±0.0038 | 0.5530 ±0.0020 | **0.5549** ±0.0007 |
-| **pkd** | 0.5404 ±0.0041 | 0.5509 ±0.0014 | 0.5501 ±0.0009 |
+| **p** | 0.5310 ±0.0027 (-4.3%) | 0.5512 ±0.0040 (-0.7%) | 0.5498 ±0.0018 (-0.9%) |
+| **pk** | 0.5432 ±0.0038 (-2.1%) | 0.5530 ±0.0020 (-0.3%) | **0.5549** ±0.0007 (+0.0%) |
+| **pkd** | 0.5404 ±0.0041 (-2.6%) | 0.5509 ±0.0014 (-0.7%) | 0.5501 ±0.0009 (-0.9%) |
 
 ### `amass_clean` / medium_thindec_100ep (3 seeds)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
-| **p** | 0.5301 ±0.0063 | 0.5475 ±0.0077 | **0.5525** ±0.0044 |
-| **pk** | 0.5372 ±0.0045 | 0.5451 ±0.0011 | 0.5518 ±0.0032 |
-| **pkd** | 0.5352 ±0.0042 | 0.5439 ±0.0034 | 0.5468 ±0.0035 |
+| **p** | 0.5301 ±0.0063 (-4.1%) | 0.5475 ±0.0077 (-0.9%) | **0.5525** ±0.0044 (+0.0%) |
+| **pk** | 0.5372 ±0.0045 (-2.8%) | 0.5451 ±0.0011 (-1.3%) | 0.5518 ±0.0032 (-0.1%) |
+| **pkd** | 0.5352 ±0.0042 (-3.1%) | 0.5439 ±0.0034 (-1.6%) | 0.5468 ±0.0035 (-1.0%) |
 
 ### `amass_clean` / medium_tinydec_100ep (1 seed, no error bar)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
 | **p** | -- | -- | -- |
-| **pk** | -- | 0.5373 | **0.5506** |
+| **pk** | -- | 0.5373 (-2.4%) | **0.5506** (+0.0%) |
 | **pkd** | -- | -- | -- |
 
 ### `amass_motionx_clean` / medium_100ep (1 seed, no error bar)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
-| **p** | 0.5339 | 0.5520 | 0.5524 |
-| **pk** | 0.5404 | **0.5590** | 0.5527 |
-| **pkd** | 0.5430 | 0.5514 | 0.5476 |
+| **p** | 0.5339 (-4.5%) | 0.5520 (-1.2%) | 0.5524 (-1.2%) |
+| **pk** | 0.5404 (-3.3%) | **0.5590** (+0.0%) | 0.5527 (-1.1%) |
+| **pkd** | 0.5430 (-2.9%) | 0.5514 (-1.4%) | 0.5476 (-2.0%) |
 
-### Delta, `amass_motionx_clean` − `amass_clean`
+### Delta, `amass_motionx_clean` − `amass_clean` (medium_100ep)
 
 | Input \ Loss | p | pk | pkd |
 | :--- | :---: | :---: | :---: |
-| **p** | +0.0034 (+0.7σ) | +0.0026 (+0.6σ) | +0.0013 (+0.3σ) |
-| **pk** | +0.0002 (+0.0σ) | +0.0116 (+2.5σ) | -0.0002 (-0.1σ) |
-| **pkd** | +0.0052 (+1.1σ) | +0.0041 (+0.9σ) | -0.0008 (-0.2σ) |
+| **p** | +0.0029 (+1.0σ) | +0.0008 (+0.3σ) | +0.0026 (+0.9σ) |
+| **pk** | -0.0028 (-1.0σ) | +0.0060 (+2.2σ) | -0.0022 (-0.8σ) |
+| **pkd** | +0.0026 (+0.9σ) | +0.0006 (+0.2σ) | -0.0025 (-0.9σ) |
 
-*σ = 0.0044 pooled over cells; n = 7 vs 1, so SE = 0.0047, σ borrowed from `amass_clean`. |z| > 2 is marginal; Bonferroni over the 9 cells needs |z| > 2.77.*
+*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0024 is the seed spread pooled over cells; with n = 3 vs 1 runs the difference of two means has SE = 0.0028, σ borrowed from `amass_clean`, so 1σ here = 0.0028 Micro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 9-cell matrix and picking the largest needs |z| > 2.77 to keep the same 5% false-positive rate over the table.*
+
+## Can the cells be ranked?
+
+| corpus | arch | cells | range | seed σ | range / σ | noise bar | verdict |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| amass_clean | medium_100ep | 9 | 0.0195 | 0.0025 | 7.75 | 2.97 | **above noise** |
+| amass_clean | medium_thindec_100ep | 9 | 0.0197 | 0.0044 | 4.49 | 2.97 | **above noise** |
+
+*Range across the cell means over the seed sd pooled across cells. The bar is E[range] of that many draws from pure noise -- nine identical cells still spread, so the comparison is against ~3σ, not 0. Above the bar the matrix carries structure worth ranking; below it, the best cell is a selection effect.*
+
+## Marginal level of each axis
+
+| corpus | arch | axis | `p` | `pk` | `pkd` |
+| :--- | :--- | :--- | ---: | ---: | ---: |
+| amass_clean | medium_100ep | input | 0.3567 | 0.3604 | 0.3556 |
+| amass_clean | medium_100ep | loss | 0.3486 | 0.3616 | 0.3625 |
+| amass_clean | medium_thindec_100ep | input | 0.3539 | 0.3545 | 0.3495 |
+| amass_clean | medium_thindec_100ep | loss | 0.3458 | 0.3533 | 0.3587 |
+
+
+## Where along the ladder the gain appears
+
+| corpus | arch | axis | `p`→`pk` | `pk`→`pkd` | total `p`→`pkd` |
+| :--- | :--- | :--- | ---: | ---: | ---: |
+| amass_clean | medium_100ep | input | +0.0036 (0.128) | -0.0048 (0.042) | -0.0011 (0.454) |
+| amass_clean | medium_100ep | loss | +0.0131 (0.011) | +0.0008 (0.447) | **+0.0139** (0.003) |
+| amass_clean | medium_thindec_100ep | input | +0.0006 (0.610) | -0.0050 (0.040) | -0.0044 (0.161) |
+| amass_clean | medium_thindec_100ep | loss | +0.0075 (0.175) | **+0.0054** (0.002) | +0.0129 (0.078) |
+
 
 ## Best cell per corpus
 

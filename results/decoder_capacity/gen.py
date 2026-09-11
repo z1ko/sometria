@@ -27,6 +27,7 @@ from pathlib import Path
 
 import polars as pl
 import yaml
+from scipy.stats import t as student_t
 from omegaconf import OmegaConf
 
 HERE = Path(__file__).resolve().parent
@@ -162,12 +163,35 @@ def stats(values: list[float]) -> tuple[float, float | None, float | None]:
     return mean, sd, (mean / se if se else None)
 
 
+def significance(t: float | None, n: int, tests: int = 1) -> tuple[str, str]:
+    """Two-sided p for a paired t, and a verdict against 0.05 Bonferroni-corrected.
+
+    p rather than a bare t because p already carries the degrees of freedom, and every
+    per-row test on this page has n = 3. There the 0.05 bar is |t| > 4.30, not the ~2 a
+    reader carries around -- t = 4.01 at n = 3 is p = 0.057, and was over-read as a result
+    at least once while this page was being written.
+
+    p is itself unstable at two degrees of freedom. Read these rows as direction and
+    magnitude; the pooled rows are the ones that decide anything.
+    """
+
+    if t is None or n < 2:
+        return "--", "--"
+    p = float(2 * student_t.sf(abs(t), n - 1))
+    text = "<0.001" if p < 0.001 else f"{p:.3f}"
+    if p < 0.05 / tests:
+        return text, ("**p < 0.05**, Bonferroni" if tests > 1 else "**p < 0.05**")
+    if p < 0.05:
+        return text, "p < 0.05, uncorrected"
+    return text, "not significant"
+
+
 def gap_table(df: pl.DataFrame, caps: dict) -> str:
     """The pk-to-pkd gap for every architecture and input row, paired on seed."""
 
     lines = [
-        "| decoder / encoder | arch | input | seeds | `loss_pk` | `loss_pkd` | gap | t |",
-        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: |",
+        "| decoder / encoder | arch | input | seeds | `loss_pk` | `loss_pkd` | gap | t | p |",
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for arch in ARCHES:
         for inp in AXIS:
@@ -186,7 +210,8 @@ def gap_table(df: pl.DataFrame, caps: dict) -> str:
             lines.append(
                 f"| {'--' if ratio is None else f'{ratio:.1f}×'} | `{arch}` | `in_{inp}` | "
                 f"{len(values)} | {levels[0]} | {levels[1]} | **{mean:+.4f}** | "
-                + ("--" if t is None else f"{t:.2f}")
+                + ("--" if t is None else f"{t:.2f}") + " | "
+                + significance(t, len(values))[0]
                 + " |"
             )
     return "\n".join(lines)
@@ -202,8 +227,8 @@ def interaction_table(df: pl.DataFrame) -> str:
 
     others = [a for a in ARCHES if a != BASELINE]
     lines = [
-        "| arch | input | " + f"`{BASELINE}` gap | this gap | change | sd | t |",
-        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: |",
+        "| arch | input | " + f"`{BASELINE}` gap | this gap | change | sd | t | p | verdict |",
+        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |",
     ]
     for arch in others:
         pooled = []
@@ -215,16 +240,18 @@ def interaction_table(df: pl.DataFrame) -> str:
             change = [b - a for a, b in zip(base, other)]
             pooled += change
             mean, sd, t = stats(change)
+            p_text, verdict = significance(t, len(change), len(AXIS))
             lines.append(
                 f"| `{arch}` | `in_{inp}` | {stats(base)[0]:+.4f} | {stats(other)[0]:+.4f} | "
                 f"**{mean:+.4f}** | " + ("--" if sd is None else f"{sd:.4f}") + " | "
-                + ("--" if t is None else f"{t:.2f}") + " |"
+                + ("--" if t is None else f"{t:.2f}") + f" | {p_text} | {verdict} |"
             )
         if len(pooled) > 1:
             mean, sd, t = stats(pooled)
+            p_text, verdict = significance(t, len(pooled))
             lines.append(
                 f"| `{arch}` | **all rows** | | | **{mean:+.4f}** | {sd:.4f} | "
-                f"**{t:.2f}** | ")
+                f"**{t:.2f}** | {p_text} | {verdict} |")
     return "\n".join(lines)
 
 
@@ -232,8 +259,8 @@ def level_table(df: pl.DataFrame) -> str:
     """What the weaker decoder costs, paired over every cell and seed it shares with the baseline."""
 
     lines = [
-        f"| arch | pairs | mean Δ vs `{BASELINE}` | sd | t | wins |",
-        "| :--- | ---: | ---: | ---: | ---: | ---: |",
+        f"| arch | pairs | mean Δ vs `{BASELINE}` | sd | t | p | wins | verdict |",
+        "| :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |",
     ]
     for arch in ARCHES:
         if arch == BASELINE:
@@ -251,11 +278,12 @@ def level_table(df: pl.DataFrame) -> str:
         if not deltas:
             continue
         mean, sd, t = stats(deltas)
+        p_text, verdict = significance(t, len(deltas))
         lines.append(
             f"| `{arch}` | {len(deltas)} | **{mean:+.4f}** | "
             + ("--" if sd is None else f"{sd:.4f}") + " | "
-            + ("--" if t is None else f"{t:.2f}") + " | "
-            f"{sum(d > 0 for d in deltas)}/{len(deltas)} |"
+            + ("--" if t is None else f"{t:.2f}") + f" | {p_text} | "
+            f"{sum(d > 0 for d in deltas)}/{len(deltas)} | {verdict} |"
         )
     return "\n".join(lines)
 
@@ -303,8 +331,11 @@ def tables(df: pl.DataFrame) -> str:
         "",
         interaction_table(df),
         "",
-        "*This is the hypothesis test. `|t| > 2` is marginal at three seeds; the per-row "
-        "numbers have two degrees of freedom each, so read the pooled row first.*",
+        "*This is the hypothesis test. `p` is two-sided at that row's own degrees of "
+        "freedom, which is why it is reported instead of a bare `t`: with three seeds the "
+        "0.05 bar is |t| > 4.30, not the ~2 most readers carry around. Per-row verdicts "
+        "are Bonferroni-corrected over the three input rows; the pooled row is those three "
+        "together, not a fourth test.*",
         "",
         "## The gap itself, per architecture and input row",
         "",

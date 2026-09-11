@@ -39,6 +39,7 @@ from statistics import NormalDist
 
 import polars as pl
 from omegaconf import OmegaConf
+from scipy import integrate, stats
 
 BENCHMARK = Path(__file__).resolve().parent.name
 HERE = Path(__file__).resolve().parent
@@ -50,6 +51,13 @@ COHORTS = ["3DGait", "BMCLab", "PD-GaM", "T-SDU-PD"]
 METRICS = ["macro_f1_0123", "macro_f1_012", "macro_map", "micro_map"]
 REPORTED = ["macro_f1_0123", "macro_f1_012", "macro_map"]
 PRIMARY = "macro_f1_0123"
+
+# The cell every paper comparison is read through. Named here rather than picked per
+# cohort on purpose: the paper reports one pre-specified protocol, and the maximum over
+# nine cells is a different quantity -- biased upward by the selection, and unusable as a
+# like-for-like claim. `in_pk` is the input the loss-channel work settled on and
+# `loss_pk` its matching target, both chosen before any CARE-PD number existed.
+REFERENCE_CELL = "in_pk__loss_pk"
 
 TITLES = {
     "macro_f1_0123": "Macro F1 (0-3)",
@@ -207,52 +215,94 @@ def cell_columns(df: pl.DataFrame) -> list[str]:
     return sorted(df["cell"].unique())
 
 
-def protocol_table(df: pl.DataFrame, protocol: str, floors: dict, reference: dict) -> str:
-    """Cohorts down, cells across; mean over seeds with the sample sd beside it."""
+def arches(df: pl.DataFrame) -> list[str]:
+    """Architectures present, baseline first.
 
-    cells = cell_columns(df)
-    subset = df.filter(pl.col("protocol") == protocol)
+    Every table below is emitted per architecture. They must never share one: the tables
+    key on (protocol, target, cell), which is not unique once a second architecture exists,
+    so a shared table silently averages two different models into one number.
+    """
+
+    found = sorted(df["arch"].unique())
+    return sorted(found, key=lambda a: (a != "medium_100ep", a))
+
+
+def expected_range(n: int) -> float:
+    """E[max - min] of n iid standard normals -- the d2 constant of control charting.
+
+    The bar table 2 is read against. Nine cells drawn from *pure noise* do not land on
+    top of each other: their range is expected to be ~3 sd, not 0, simply because the
+    largest and smallest of nine draws are far apart. Comparing an observed range against
+    0 would call every matrix "structured".
+
+    Derived rather than tabulated so it follows the cell count: E[range] = 2*E[max] for a
+    symmetric distribution, and E[max] = n * integral of x*phi(x)*Phi(x)^(n-1).
+    """
+
+    if n < 2:
+        return 0.0
+    normal = NormalDist()
+    integrand = lambda x: x * normal.pdf(x) * normal.cdf(x) ** (n - 1)
+    return 2 * n * integrate.quad(integrand, -10, 10)[0]
+
+
+def protocol_table(df: pl.DataFrame, protocol: str, floors: dict, reference: dict) -> str:
+    """Cohorts down, one pre-specified cell across, against the published band.
+
+    Deliberately not the 3x3 matrix: table 2 shows the nine cells spread less than nine
+    noise draws would within a cohort, so nine columns would be nine unrankable numbers
+    inviting exactly the best-of-nine reading they cannot support. The matrix stays in
+    metrics.csv, and the ranking question is answered pooled and paired in table 3.
+    """
+
+    subset = df.filter((pl.col("protocol") == protocol) & (pl.col("cell") == REFERENCE_CELL))
     paper = reference.get({"loso": "within_dataset_loso", "lodo": "lodo"}.get(protocol, ""), {})
 
-    header = ["target", "folds", "majority floor", *(f"`{c}`" for c in cells)]
+    header = ["target", "folds", "majority floor", f"ours (`{REFERENCE_CELL}`)"]
+    align = "| :--- | ---: | ---: | ---: |"
     if paper:
-        header.append("paper")
-    lines = [
-        "| " + " | ".join(header) + " |",
-        "| :--- | ---: | ---: |" + " ---: |" * len(cells) + (" :---: |" if paper else ""),
-    ]
+        banded = any("mean" in e for e in paper.values() if isinstance(e, dict))
+        header += ["paper (7 encoders)" if banded else "paper (Fig. 4a range)", "z", "verdict"]
+        align += " :---: | ---: | :--- |"
+    lines = ["| " + " | ".join(header) + " |", align]
 
     for target in COHORTS:
         rows = subset.filter(pl.col("target") == target)
         if rows.is_empty():
             continue
-        group = rows["group"][0]
-        floor = floors.get(group)
-        cell_text = []
-        for cell in cells:
-            values = rows.filter(pl.col("cell") == cell)[PRIMARY].to_list()
-            values = [v for v in values if v is not None]
-            if not values:
-                cell_text.append("--")
-                continue
-            mean = sum(values) / len(values)
-            if len(values) > 1:
-                sd = (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** 0.5
-                cell_text.append(f"{mean:.4f} ±{sd:.4f}")
-            else:
-                cell_text.append(f"{mean:.4f}")
+        values = [v for v in rows[PRIMARY].to_list() if v is not None]
+        if not values:
+            continue
+        mean = sum(values) / len(values)
+        if len(values) > 1:
+            sd = (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** 0.5
+            ours = f"{mean:.4f} ±{sd:.4f}"
+        else:
+            ours = f"{mean:.4f}"
+
+        floor = floors.get(rows["group"][0])
         line = (
             f"| **{target}** | {rows['folds'][0]} | "
-            f"{'--' if floor is None else f'{floor:.4f}'} | " + " | ".join(cell_text)
+            f"{'--' if floor is None else f'{floor:.4f}'} | {ours}"
         )
         if paper:
             entry = paper.get(target, {})
             if "mean" in entry:
-                line += f" | {entry['mean']:.3f} ±{entry['sd']:.3f}"
+                # z against the paper's own across-encoder sd. That sd measures how much
+                # seven different encoders disagree, not a confidence interval, so |z| < 1
+                # means "inside the band the published models span" -- a weaker statement
+                # than "indistinguishable from their mean", and the caption says so.
+                z = (mean - entry["mean"]) / entry["sd"]
+                verdict = "in band" if abs(z) < 2 else "**outside**"
+                line += f" | {entry['mean']:.3f} ±{entry['sd']:.3f} | {z:+.2f} | {verdict}"
             elif "low" in entry:
-                line += f" | {entry['low']:.2f}–{entry['high']:.2f}"
+                inside = entry["low"] <= mean <= entry["high"]
+                line += (
+                    f" | {entry['low']:.2f}–{entry['high']:.2f} | -- | "
+                    + ("in band" if inside else "**outside**")
+                )
             else:
-                line += " | --"
+                line += " | -- | -- | --"
         lines.append(line + " |")
     return "\n".join(lines)
 
@@ -266,6 +316,14 @@ def cross_matrix(df: pl.DataFrame, cell: str) -> str:
         for r in subset.group_by("source", "target").agg(pl.col(PRIMARY).mean()).iter_rows(named=True)
     }
 
+    # Best source per target, so the bold reads down a column: "who transfers best to here".
+    best = {
+        target: max(
+            (values[(s, target)] for s in COHORTS if (s, target) in values), default=None
+        )
+        for target in COHORTS
+    }
+
     lines = [
         "| train \\ test | " + " | ".join(COHORTS) + " | mean |",
         "| :--- |" + " ---: |" * (len(COHORTS) + 1),
@@ -277,16 +335,19 @@ def cross_matrix(df: pl.DataFrame, cell: str) -> str:
                 cells.append("·")
                 continue
             value = values.get((source, target))
-            cells.append("--" if value is None else f"{value:.4f}")
-            if value is not None:
-                present.append(value)
-        mean = f"**{sum(present) / len(present):.4f}**" if present else "--"
+            if value is None:
+                cells.append("--")
+                continue
+            text = f"{value:.4f}"
+            cells.append(f"**{text}**" if value == best[target] else text)
+            present.append(value)
+        mean = f"*{sum(present) / len(present):.4f}*" if present else "--"
         lines.append(f"| **{source}** | " + " | ".join(cells) + f" | {mean} |")
 
     footer = []
     for target in COHORTS:
         column = [values[(s, target)] for s in COHORTS if (s, target) in values]
-        footer.append(f"**{sum(column) / len(column):.4f}**" if column else "--")
+        footer.append(f"*{sum(column) / len(column):.4f}*" if column else "--")
     lines.append("| **mean** | " + " | ".join(footer) + " | |")
     return "\n".join(lines)
 
@@ -305,20 +366,22 @@ def cell_delta(df: pl.DataFrame) -> list[str]:
         return []
     base, other = cells
 
+    # Keyed on arch as well: without it two architectures share a (group, seed, cell) key
+    # and one silently overwrites the other, so the "paired" difference is taken between
+    # whichever model happened to be read last.
     keyed = {
-        (r["group"], r["seed"], r["cell"]): r[PRIMARY]
+        (r["arch"], r["group"], r["seed"], r["cell"]): r[PRIMARY]
         for r in df.iter_rows(named=True)
         if r[PRIMARY] is not None
     }
-    pairs = [
-        (group, seed, keyed[(group, seed, other)] - keyed[(group, seed, base)])
-        for group, seed, cell in keyed
-        if cell == base and (group, seed, other) in keyed
+    deltas = [
+        keyed[(arch, group, seed, other)] - value
+        for (arch, group, seed, cell), value in keyed.items()
+        if cell == base and (arch, group, seed, other) in keyed
     ]
-    if not pairs:
+    if not deltas:
         return []
 
-    deltas = [d for _, _, d in pairs]
     n = len(deltas)
     mean = sum(deltas) / n
     sd = (sum((d - mean) ** 2 for d in deltas) / (n - 1)) ** 0.5 if n > 1 else 0.0
@@ -348,6 +411,294 @@ def cell_delta(df: pl.DataFrame) -> list[str]:
     ]
 
 
+def significance(t: float | None, n: int, tests: int = 1) -> tuple[str, str]:
+    """Two-sided p for a paired t, and a verdict against 0.05 Bonferroni-corrected.
+
+    p rather than a critical value because p already carries the degrees of freedom.
+    The same t means very different things at different sample sizes -- t = 4.01 is
+    p = 0.057 at n = 3 and p = 0.0005 at n = 23 -- and a reader comparing a bare t against
+    a remembered "about 2" gets the small-n rows wrong every time.
+
+    p is itself unstable at n = 3: two degrees of freedom estimate the spread poorly, so
+    read those rows as direction and magnitude, not as a decision.
+    """
+
+    if t is None or n < 2:
+        return "--", "--"
+    p = float(2 * stats.t.sf(abs(t), n - 1))
+    text = "<0.001" if p < 0.001 else f"{p:.3f}"
+    return text, ("**significant**" if p < 0.05 / tests else "not significant")
+
+
+def architecture_table(df: pl.DataFrame) -> list[str]:
+    """Paired architecture comparison, one protocol family per row.
+
+    The pairing unit is a ``(cell, seed)`` pair, with the protocol groups inside a family
+    averaged first. That choice is the whole reason this table can be trusted, and it is
+    not the obvious one: there are 20 protocol groups per run, so treating each as a sample
+    would give 540 "pairs" and a t-statistic several times too large. Those groups share one
+    encoder and heavily overlapping data -- LOSO folds partition the same takes, LODO
+    re-evaluates the same cohort, cross-dataset reuses all of it -- so they are one
+    measurement of one model, not twenty.
+
+    Cells and seeds are different pretraining runs, so those are the replicates. Means are
+    taken over the *paired* subset only: coverage differs between architectures, and a mean
+    over everything available would not add up to the delta beside it.
+    """
+
+    present = arches(df)
+    if len(present) < 2:
+        return []
+    baseline, *others = present
+
+    def per_run(arch: str, protocols: tuple[str, ...]) -> dict[tuple[str, str], float]:
+        rows = df.filter(pl.col("arch") == arch) if arch else df
+        rows = rows.filter(pl.col("protocol").is_in(list(protocols)))
+        grouped = rows.group_by("cell", "seed").agg(pl.col(PRIMARY).mean())
+        return {(r["cell"], r["seed"]): r[PRIMARY] for r in grouped.iter_rows(named=True)}
+
+    families = [(k, (k,)) for k in ("loso", "lodo", "cross")] + [("all", ("loso", "lodo", "cross"))]
+
+    # Bonferroni over the protocol families, because those three rows are three chances to
+    # find a difference and the eye reads them as one. The "all" row is *not* one of them:
+    # it is a single pre-specified test on the three pooled, so it is judged at plain 0.05.
+    # Correcting it too would penalise it for its own components.
+    families_tested = sum(1 for label, _ in families if label != "all")
+    lines = [
+        "## Architecture comparison",
+        "",
+        "| protocol | " + " | ".join(f"`{a}`" for a in present)
+        + " | Δ | p | verdict |",
+        "| :--- |" + " ---: |" * (len(present) + 2) + " :--- |",
+    ]
+    for label, protocols in families:
+        base = per_run(baseline, protocols)
+        for arch in others:
+            mine = per_run(arch, protocols)
+            shared = sorted(set(base) & set(mine))
+            if not shared:
+                continue
+            deltas = [mine[k] - base[k] for k in shared]
+            n = len(deltas)
+            mean = sum(deltas) / n
+            sd = (sum((d - mean) ** 2 for d in deltas) / (n - 1)) ** 0.5 if n > 1 else None
+            t = mean / (sd / n**0.5) if sd else None
+            levels = {
+                baseline: sum(base[k] for k in shared) / n,
+                arch: sum(mine[k] for k in shared) / n,
+            }
+            p_text, verdict = significance(t, n, 1 if label == "all" else families_tested)
+            lines.append(
+                f"| {PROTOCOL_TITLES.get(label, label)} | "
+                + " | ".join(f"{levels[a]:.4f}" if a in levels else "--" for a in present)
+                + f" | **{mean:+.4f}** | {p_text} | {verdict} |"
+            )
+    lines += [
+        "",
+        f"*Δ is `{others[0]}` − `{baseline}`, paired on (cell, seed) with protocol groups "
+        "averaged inside each family first. Positive favours the second architecture. "
+        "Levels are over the paired subset only, so they differ slightly from the tables "
+        "above where coverage is uneven.*",
+        "",
+        f"*`p` is two-sided for a paired t at that row's own degrees of freedom. The "
+        f"{families_tested} protocol rows are read together, so their verdict threshold is "
+        f"p < {0.05 / families_tested:.4f}; the `all` row is a single test on those "
+        f"{families_tested} pooled and is judged at p < 0.05. Full statistics -- sd, t, "
+        "pair counts and win rates -- are in `metrics.csv`.*",
+        "",
+    ]
+    return lines
+
+
+def matrix_noise_table(df: pl.DataFrame) -> list[str]:
+    """Table 2 -- is the cell matrix distinguishable from noise inside a single cohort?
+
+    For each (protocol, cohort): the range across the cell means, divided by the seed sd
+    pooled over those cells. Read against expected_range(n_cells), which is what pure
+    noise produces. Below the bar means the cells cannot be ranked within that cohort at
+    all, and any "best cell" bolding there is selecting on seed noise.
+    """
+
+    rows = []
+    for protocol in ("loso", "cross", "lodo"):
+        subset = df.filter(pl.col("protocol") == protocol)
+        if subset.is_empty():
+            continue
+        for target in COHORTS:
+            block = subset.filter(pl.col("target") == target)
+            if block.is_empty():
+                continue
+            per_cell = block.group_by("cell").agg(
+                pl.col(PRIMARY).mean().alias("mean"),
+                pl.col(PRIMARY).std().alias("sd"),
+                pl.len().alias("n"),
+            )
+            means = [m for m in per_cell["mean"].to_list() if m is not None]
+            # Pooled over cells: a per-cell sd on three seeds carries two degrees of
+            # freedom and is mostly luck, and this ratio's denominator has to be stable.
+            sds = [v for v in per_cell.filter(pl.col("n") > 1)["sd"].to_list() if v is not None]
+            if len(means) < 2 or not sds:
+                continue
+            sigma = sum(sds) / len(sds)
+            spread = max(means) - min(means)
+            rows.append((protocol, target, len(means), spread, sigma, spread / sigma))
+
+    if not rows:
+        return []
+
+    counts = {n for _, _, n, _, _, _ in rows}
+    bars = {n: expected_range(n) for n in counts}
+    lines = [
+        "### Is the cell matrix distinguishable from noise?",
+        "",
+        "| protocol | target | cells | range | seed σ | range / σ | noise bar | verdict |",
+        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | :--- |",
+    ]
+    for protocol, target, n, spread, sigma, ratio in rows:
+        bar = bars[n]
+        verdict = "**above noise**" if ratio > bar else "within noise"
+        lines.append(
+            f"| {PROTOCOL_TITLES.get(protocol, protocol)} | {target} | {n} | {spread:.4f} | "
+            f"{sigma:.4f} | {ratio:.2f} | {bar:.2f} | {verdict} |"
+        )
+
+    above = sum(1 for *_, n, _, _, ratio in [(0, 0, *r[2:]) for r in rows] if ratio > bars[n])
+    bar_text = ", ".join(f"{bars[n]:.2f} for {n} cells" for n in sorted(counts))
+    lines += [
+        "",
+        f"*The noise bar is E[range] of that many draws from pure noise ({bar_text}) -- "
+        "nine identical cells still spread, so the comparison is against ~3σ, not 0. "
+        f"{above} of {len(rows)} cohort-protocol blocks clear it. Where a block does not, "
+        "its nine cells are unrankable and the largest of them is a selection effect, not "
+        "a winner; the ranking question is answered pooled and paired below.*",
+        "",
+    ]
+    return lines
+
+
+def marginal_table(df: pl.DataFrame) -> list[str]:
+    """The p -> pk -> pkd ladder for each axis, per protocol, with the step between rungs.
+
+    Table 2 says the nine cells cannot be ranked inside one cohort. That is a power
+    statement, not an absence: cohort difficulty spans 0.24 to 0.67 here, which swamps a
+    channel effect an order of magnitude smaller. Comparing levels *within* the same
+    (split set, seed) cancels the cohort offset, and what survives is the marginal effect
+    of one axis.
+
+    Steps rather than all pairwise contrasts: the levels are nested (pk adds velocity and
+    acceleration to p, pkd adds torque to pk), so the question is where along the ladder
+    the change appears. Signed `next - current`, so positive means widening helped.
+    """
+
+    levels = ["p", "pk", "pkd"]
+    steps = [(levels[i], levels[i + 1]) for i in range(len(levels) - 1)]
+
+    def paired(subset, axis, lo, hi):
+        wide = (
+            subset.group_by("group", "seed", axis)
+            .agg(pl.col(PRIMARY).mean())
+            .pivot(on=axis, index=["group", "seed"], values=PRIMARY)
+            .drop_nulls()
+        )
+        if lo not in wide.columns or hi not in wide.columns or wide.height < 2:
+            return None, None, 0
+        diff = (wide[hi] - wide[lo]).to_list()
+        n = len(diff)
+        mean = sum(diff) / n
+        sd = (sum((d - mean) ** 2 for d in diff) / (n - 1)) ** 0.5
+        if sd == 0:
+            return mean, None, n
+        return mean, mean / (sd / n**0.5), n
+
+    rows = []
+    for protocol in ("loso", "cross", "lodo"):
+        subset = df.filter(pl.col("protocol") == protocol)
+        if subset.is_empty():
+            continue
+        for axis in ("input", "loss"):
+            marginal = {
+                r[axis]: r[PRIMARY]
+                for r in subset.group_by(axis).agg(pl.col(PRIMARY).mean()).iter_rows(named=True)
+            }
+            measured = [paired(subset, axis, lo, hi) for lo, hi in steps]
+            total = paired(subset, axis, levels[0], levels[-1])
+            rows.append((protocol, axis, marginal, measured, total))
+
+    if not rows:
+        return []
+
+    tests = sum(len(r[3]) + 1 for r in rows)
+
+    def cell(entry):
+        mean, t, n = entry
+        if mean is None:
+            return "--"
+        p_text, verdict = significance(t, n, tests)
+        bold = verdict.startswith("**")
+        joiner = "" if p_text.startswith("<") else "="
+        return (f"**{mean:+.4f}**" if bold else f"{mean:+.4f}") + f" (p{joiner}{p_text}, n={n})"
+
+    header = ["protocol", "axis"]
+    for lo, hi in steps:
+        header += [f"`{lo}`", f"→ `{hi}`"]
+    header += [f"`{levels[-1]}`", f"total `{levels[0]}`→`{levels[-1]}`"]
+
+    def step_cell(entry):
+        mean, t, n = entry
+        if mean is None:
+            return "--"
+        p_text, verdict = significance(t, n, tests)
+        body = f"**{mean:+.4f}**" if verdict.startswith("**") else f"{mean:+.4f}"
+        return f"{body} ({p_text})"
+
+    level_header = ["protocol", "axis"] + [f"`{lv}`" for lv in levels]
+    step_header = (
+        ["protocol", "axis", "pairs"]
+        + [f"`{lo}`→`{hi}`" for lo, hi in steps]
+        + [f"total `{levels[0]}`→`{levels[-1]}`"]
+    )
+
+    lines = [
+        "### Marginal level of each axis",
+        "",
+        "| " + " | ".join(level_header) + " |",
+        "| :--- | :--- |" + " ---: |" * len(levels),
+    ]
+    for protocol, axis, marginal, _, _ in rows:
+        lines.append(
+            f"| {PROTOCOL_TITLES.get(protocol, protocol)} | {axis} | "
+            + " | ".join(f"{marginal[lv]:.4f}" if lv in marginal else "--" for lv in levels)
+            + " |"
+        )
+    lines += [
+        "",
+        "*Each value averages over the other axis, every cohort and every seed. Levels "
+        "only -- whether a difference between them is real is the next table.*",
+        "",
+        "### Where along the ladder the change appears",
+        "",
+        "| " + " | ".join(step_header) + " |",
+        "| :--- | :--- | ---: |" + " ---: |" * (len(steps) + 1),
+    ]
+    for protocol, axis, _, measured, total in rows:
+        pairs = max([n for _, _, n in [*measured, total]] or [0])
+        lines.append(
+            f"| {PROTOCOL_TITLES.get(protocol, protocol)} | {axis} | {pairs} | "
+            + " | ".join(step_cell(e) for e in [*measured, total])
+            + " |"
+        )
+    lines += [
+        "",
+        "*Paired step to the next rung, signed so positive means widening helped. Paired "
+        "on (split set, seed), which cancels the cohort offset -- cohort difficulty spans "
+        "0.24 to 0.67 here and would otherwise swamp an effect an order of magnitude "
+        f"smaller. Parenthesis is the two-sided paired p; bold is significant at 0.05 "
+        f"Bonferroni-corrected over the {tests} steps and totals shown.*",
+        "",
+    ]
+    return lines
+
+
 def seed_spread(df: pl.DataFrame) -> list[str]:
     """Seed-to-seed sd of the pooled figure, pooled over the groups of each protocol.
 
@@ -356,7 +707,7 @@ def seed_spread(df: pl.DataFrame) -> list[str]:
     """
 
     per_group = (
-        df.group_by("protocol", "cell", "group")
+        df.group_by("arch", "protocol", "cell", "group")
         .agg(pl.len().alias("n"), *[pl.col(m).std().alias(f"sd_{m}") for m in REPORTED])
         .filter(pl.col("n") > 1)
     )
@@ -364,22 +715,23 @@ def seed_spread(df: pl.DataFrame) -> list[str]:
         return []
 
     spread = (
-        per_group.group_by("protocol")
+        per_group.group_by("arch", "protocol")
         .agg(
             pl.col("n").max().alias("seeds"),
             pl.len().alias("group_cells"),
             *[pl.col(f"sd_{m}").mean().alias(f"sd_{m}") for m in REPORTED],
         )
-        .sort("protocol")
+        .sort("arch", "protocol")
     )
     return [
         "## Seed spread",
         "",
-        "| protocol | seeds | group×cells | " + " | ".join(f"sd {TITLES[m]}" for m in REPORTED) + " |",
-        "| :--- | ---: | ---: |" + " ---: |" * len(REPORTED),
+        "| arch | protocol | seeds | group×cells | "
+        + " | ".join(f"sd {TITLES[m]}" for m in REPORTED) + " |",
+        "| :--- | :--- | ---: | ---: |" + " ---: |" * len(REPORTED),
         *(
-            f"| {PROTOCOL_TITLES.get(r['protocol'], r['protocol'])} | {r['seeds']} | "
-            f"{r['group_cells']} | "
+            f"| `{r['arch']}` | {PROTOCOL_TITLES.get(r['protocol'], r['protocol'])} | "
+            f"{r['seeds']} | {r['group_cells']} | "
             + " | ".join(f"{r[f'sd_{m}']:.4f}" for m in REPORTED)
             + " |"
             for r in spread.iter_rows(named=True)
@@ -394,12 +746,18 @@ def metric_variants(df: pl.DataFrame) -> list[str]:
     lines = [
         "## The three metrics, side by side",
         "",
-        "| protocol | target | " + " | ".join(TITLES[m] for m in REPORTED) + " | 0-2 ÷ 0-3 |",
-        "| :--- | :--- |" + " ---: |" * (len(REPORTED) + 1),
+        "| arch | protocol | target | " + " | ".join(TITLES[m] for m in REPORTED)
+        + " | 0-2 ÷ 0-3 |",
+        "| :--- | :--- | :--- |" + " ---: |" * (len(REPORTED) + 1),
     ]
-    for protocol in ("loso", "lodo"):
+    for arch in arches(df):
+      for protocol in ("loso", "lodo"):
         for target in COHORTS:
-            rows = df.filter((pl.col("protocol") == protocol) & (pl.col("target") == target))
+            rows = df.filter(
+                (pl.col("arch") == arch)
+                & (pl.col("protocol") == protocol)
+                & (pl.col("target") == target)
+            )
             if rows.is_empty():
                 continue
             means = {m: rows[m].mean() for m in REPORTED}
@@ -409,7 +767,7 @@ def metric_variants(df: pl.DataFrame) -> list[str]:
                 else None
             )
             lines.append(
-                f"| {protocol} | {target} | "
+                f"| `{arch}` | {protocol} | {target} | "
                 + " | ".join(f"{means[m]:.4f}" for m in REPORTED)
                 + f" | {'--' if ratio is None else f'{ratio:.3f}'} |"
             )
@@ -419,58 +777,105 @@ def metric_variants(df: pl.DataFrame) -> list[str]:
 def tables(df: pl.DataFrame) -> str:
     floors = majority_floor()
     reference = json.loads((HERE / "reference.json").read_text())
-    cells = cell_columns(df)
-    runs = df.select("corpus", "arch", "seed", "cell").unique().height
+    present = arches(df)
     seeds = sorted(df["seed"].unique())
+    runs = df.select("corpus", "arch", "seed", "cell").unique().height
 
     parts = [
-        f"*{runs} runs ({len(cells)} cells × {len(seeds)} seeds) over "
-        f"{df['group'].n_unique()} protocol groups. Pooled figures throughout. "
-        "Regenerate with `gen.py`.*",
+        f"*{runs} runs over {df['group'].n_unique()} protocol groups: "
+        f"{len(present)} architecture{'s' if len(present) > 1 else ''}, up to "
+        f"{df['cell'].n_unique()} cells, up to {len(seeds)} seeds. Pooled figures "
+        "throughout. Regenerate with `gen.py`.*",
         "",
-        f"Corpus `{'`, `'.join(sorted(df['corpus'].unique()))}`, "
-        f"arch `{'`, `'.join(sorted(df['arch'].unique()))}`, seeds "
+        f"Corpus `{'`, `'.join(sorted(df['corpus'].unique()))}`, seeds "
         f"{', '.join(s.removeprefix('seed') for s in seeds)}. "
         f"Primary metric **{TITLES[PRIMARY]}**, the paper's.",
         "",
+        "Tables are split by architecture and never pooled across them. They key on "
+        "(protocol, target, cell), which stops being unique the moment a second "
+        "architecture exists, so one shared table would average two different models into "
+        "a single number without saying so.",
+        "",
     ]
 
-    for protocol in ("loso", "lodo"):
-        if df.filter(pl.col("protocol") == protocol).is_empty():
-            continue
-        parts += [
-            f"## {PROTOCOL_TITLES[protocol]}",
-            "",
-            protocol_table(df, protocol, floors, reference),
-            "",
-        ]
-
-    if not df.filter(pl.col("protocol") == "cross").is_empty():
-        parts += [f"## {PROTOCOL_TITLES['cross']}", ""]
-        for cell in cells:
-            parts += [f"### `{cell}`", "", cross_matrix(df, cell), ""]
-        paper = reference.get("cross_dataset", {})
-        if paper:
-            measured = (
-                df.filter(pl.col("protocol") == "cross")
-                .group_by("target")
-                .agg(pl.col(PRIMARY).mean())
-            )
-            got = {r["target"]: r[PRIMARY] for r in measured.iter_rows(named=True)}
+    for arch in present:
+        subset = df.filter(pl.col("arch") == arch)
+        parts += [f"## `{arch}`", ""]
+        for protocol in ("loso", "lodo"):
+            if subset.filter(pl.col("protocol") == protocol).is_empty():
+                continue
             parts += [
-                "| by target | " + " | ".join(COHORTS) + " |",
-                "| :--- |" + " ---: |" * len(COHORTS),
-                "| ours | " + " | ".join(f"{got[c]:.4f}" if c in got else "--" for c in COHORTS) + " |",
-                "| paper | "
-                + " | ".join(
-                    f"{paper[c]['mean']:.3f} ±{paper[c]['sd']:.3f}" if c in paper else "--"
-                    for c in COHORTS
-                )
-                + " |",
+                f"### {PROTOCOL_TITLES[protocol]}",
+                "",
+                protocol_table(subset, protocol, floors, reference),
+                "",
+                f"*One cell, `{REFERENCE_CELL}`, fixed in advance -- not the best of "
+                f"{subset['cell'].n_unique()}, which would be biased upward by the "
+                "selection and not comparable with the paper's single pre-specified "
+                "protocol. The paper column is a spread across published encoders, not a "
+                "confidence interval, so \"in band\" means inside the range those models "
+                "cover and is weaker than matching their mean. Every cell is in "
+                "`metrics.csv`; whether they can be ranked at all is below.*",
                 "",
             ]
+        if not subset.filter(pl.col("protocol") == "cross").is_empty():
+            parts += [f"### {PROTOCOL_TITLES['cross']}", ""]
+            for cell in cell_columns(subset):
+                parts += [f"#### `{cell}`", "", cross_matrix(subset, cell), ""]
+            parts += [
+                "*Bold is the best source for each target, read down a column. Row and "
+                "column means are italic -- a different axis, not a winner.*",
+                "",
+            ]
+            paper = reference.get("cross_dataset", {})
+            if paper:
+                cross = subset.filter(pl.col("protocol") == "cross")
+                got = {
+                    r["target"]: r[PRIMARY]
+                    for r in cross.group_by("target").agg(pl.col(PRIMARY).mean()).iter_rows(named=True)
+                }
+                # Which cell the best number came from. "ours" above is an average over
+                # every cell, which is the right analogue to the paper's average over seven
+                # encoders -- but it means no single row of this table is attributable to a
+                # model you could point at, and that is worth saying rather than implying.
+                per_cell = cross.group_by("target", "cell").agg(pl.col(PRIMARY).mean())
+                best = {}
+                for r in per_cell.iter_rows(named=True):
+                    if r["target"] not in best or r[PRIMARY] > best[r["target"]][0]:
+                        best[r["target"]] = (r[PRIMARY], r["cell"])
+                n_cells = cross["cell"].n_unique()
+                n_seeds = cross["seed"].n_unique()
+                parts += [
+                    "| by target | " + " | ".join(COHORTS) + " |",
+                    "| :--- |" + " ---: |" * len(COHORTS),
+                    f"| ours, mean over {n_cells} cells | "
+                    + " | ".join(f"{got[c]:.4f}" if c in got else "--" for c in COHORTS)
+                    + " |",
+                    "| ours, best cell | "
+                    + " | ".join(f"{best[c][0]:.4f}" if c in best else "--" for c in COHORTS)
+                    + " |",
+                    "| which cell | "
+                    + " | ".join(f"`{best[c][1]}`" if c in best else "--" for c in COHORTS)
+                    + " |",
+                    "| paper, mean over 7 encoders | "
+                    + " | ".join(
+                        f"{paper[c]['mean']:.3f} ±{paper[c]['sd']:.3f}" if c in paper else "--"
+                        for c in COHORTS
+                    )
+                    + " |",
+                    "",
+                    f"*`ours, mean over {n_cells} cells` averages every input×loss cell, all "
+                    f"three source cohorts and up to {n_seeds} seeds -- the closest analogue "
+                    "to the paper averaging seven encoders. `ours, best cell` is the largest "
+                    f"of those {n_cells} means and is biased upward; `which cell` names it so "
+                    "the number is attributable to a checkpoint rather than to a table.*",
+                    "",
+                ]
+        parts += matrix_noise_table(subset)
+        parts += marginal_table(subset)
+        parts += cell_delta(subset)
 
-    parts += cell_delta(df)
+    parts += architecture_table(df)
     parts += seed_spread(df)
     parts += metric_variants(df)
 

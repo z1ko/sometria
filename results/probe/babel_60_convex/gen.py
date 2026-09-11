@@ -23,6 +23,7 @@ from statistics import NormalDist
 
 import polars as pl
 from omegaconf import OmegaConf
+from scipy import integrate, stats
 
 BENCHMARK = Path(__file__).resolve().parent.name
 HERE = Path(__file__).resolve().parent
@@ -119,7 +120,8 @@ def matrix(df: pl.DataFrame, metric: str) -> str:
 
     Cells hold the mean over whatever replicates exist, with the sample standard deviation
     beside it once there is more than one. A single number with no spread beside it is a
-    single run, and should be read as such.
+    single run, and should be read as such. The percentage is the cell's shortfall against
+    the best cell of the same table.
     """
 
     stats = {}
@@ -141,12 +143,17 @@ def matrix(df: pl.DataFrame, metric: str) -> str:
                 continue
             mean, sd, n = entry
             text = f"**{mean:.4f}**" if mean == best else f"{mean:.4f}"
-            cells.append(text if sd is None else f"{text} ±{sd:.4f}")
+            if sd is not None:
+                text += f" ±{sd:.4f}"
+            # Relative to the best cell in this table, not to the grand mean: the question
+            # a matrix gets read for is "how much is this cell giving up", and 4-decimal
+            # absolutes make a 2% shortfall and a 0.2% one look alike.
+            cells.append(f"{text} ({(mean - best) / best:+.1%})")
         lines.append(f"| **{row}** | " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 
-def pooled_sigma(df: pl.DataFrame, corpus: str, metric: str) -> tuple[float | None, int]:
+def pooled_sigma(df: pl.DataFrame, corpus: str, arch: str, metric: str) -> tuple[float | None, int]:
     """Replicate standard deviation pooled over cells, and runs per cell.
 
     Pooled rather than per-cell: with three replicates a per-cell sd carries two degrees of
@@ -156,7 +163,7 @@ def pooled_sigma(df: pl.DataFrame, corpus: str, metric: str) -> tuple[float | No
     """
 
     per_cell = (
-        df.filter(pl.col("corpus") == corpus)
+        df.filter((pl.col("corpus") == corpus) & (pl.col("arch") == arch))
         .group_by("cell")
         .agg(pl.len().alias("n"), pl.col(metric).std().alias("sd"))
     )
@@ -166,7 +173,7 @@ def pooled_sigma(df: pl.DataFrame, corpus: str, metric: str) -> tuple[float | No
     return float(replicated["sd"].mean()), int(replicated["n"].max())
 
 
-def delta(df: pl.DataFrame, base: str, other: str, metric: str) -> tuple[str, str]:
+def delta(df: pl.DataFrame, base: str, other: str, arch: str, metric: str) -> tuple[str, str]:
     """Signed difference table, `other` minus `base`, in raw units and in sigmas.
 
     A raw delta cannot be read without holding the replicate spread in mind, and a sigma
@@ -175,14 +182,16 @@ def delta(df: pl.DataFrame, base: str, other: str, metric: str) -> tuple[str, st
     """
 
     def values(corpus):
-        rows = df.filter(pl.col("corpus") == corpus).group_by("input", "loss").agg(
-            pl.col(metric).mean()
+        rows = (
+            df.filter((pl.col("corpus") == corpus) & (pl.col("arch") == arch))
+            .group_by("input", "loss")
+            .agg(pl.col(metric).mean())
         )
         return {(r["input"], r["loss"]): r[metric] for r in rows.iter_rows(named=True)}
 
     a, b = values(base), values(other)
-    sigma_a, n_a = pooled_sigma(df, base, metric)
-    sigma_b, n_b = pooled_sigma(df, other, metric)
+    sigma_a, n_a = pooled_sigma(df, base, arch, metric)
+    sigma_b, n_b = pooled_sigma(df, other, arch, metric)
 
     # Either corpus may be unreplicated. Use whichever sigma exists -- an unreplicated
     # corpus still varies by seed, it just has not been measured, so borrowing the
@@ -214,11 +223,203 @@ def delta(df: pl.DataFrame, base: str, other: str, metric: str) -> tuple[str, st
         cells = len(AXIS) ** 2
         bonferroni = NormalDist().inv_cdf(1 - 0.05 / (2 * cells))
         note = (
-            f"*σ = {sigma:.4f} pooled over cells; n = {n_a} vs {n_b}, so SE = {se:.4f}"
-            f"{borrowed}. |z| > 2 is marginal; Bonferroni over the {cells} cells needs "
-            f"|z| > {bonferroni:.2f}.*"
+            f"*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many "
+            f"standard errors of the difference the delta is, not how many seed sd's. "
+            f"σ = {sigma:.4f} is the seed spread pooled over cells; with n = {n_a} vs "
+            f"{n_b} runs the difference of two means has SE = {se:.4f}{borrowed}, so "
+            f"1σ here = {se:.4f} {TITLES.get(metric, metric)}. |z| > 2 is marginal (p < 0.05 for one "
+            f"pre-chosen cell); reading the whole {cells}-cell matrix and picking the "
+            f"largest needs |z| > {bonferroni:.2f} to keep the same 5% false-positive "
+            f"rate over the table.*"
         )
     return "\n".join(lines), note
+
+
+def expected_range(n: int) -> float:
+    """E[max - min] of n iid standard normals -- the d2 constant of control charting.
+
+    Nine cells drawn from *pure noise* do not land on top of each other: the largest and
+    smallest of nine draws are ~3 sd apart by construction. So the question "is this
+    matrix structured" is asked against ~3, not against 0, and a matrix spanning 2 sd is
+    spreading *less* than noise would.
+
+    Derived rather than tabulated so it follows the cell count: E[range] = 2*E[max] for a
+    symmetric distribution, and E[max] = n * integral of x*phi(x)*Phi(x)^(n-1).
+    """
+
+    if n < 2:
+        return 0.0
+    normal = NormalDist()
+    integrand = lambda x: x * normal.pdf(x) * normal.cdf(x) ** (n - 1)
+    return 2 * n * integrate.quad(integrand, -10, 10)[0]
+
+
+def rankability(df: pl.DataFrame, metric: str) -> list[str]:
+    """Is the cell-to-cell spread bigger than seed noise makes it?
+
+    Same test `results/probe/carepd_updrs_convex` runs per cohort, where it comes out the
+    other way: there 1 of 12 cohort-protocol blocks clears the bar, so the nine cells are
+    unrankable within a cohort. BABEL scores one pooled validation set rather than a
+    handful of held-out subjects, which is most likely why the same nine checkpoints
+    separate cleanly here and not there.
+    """
+
+    rows = []
+    for (corpus, arch), group in sorted(df.group_by("corpus", "arch")):
+        per_cell = group.group_by("cell").agg(
+            pl.col(metric).mean().alias("mean"),
+            pl.col(metric).std().alias("sd"),
+            pl.len().alias("n"),
+        )
+        means = [m for m in per_cell["mean"].to_list() if m is not None]
+        sds = [v for v in per_cell.filter(pl.col("n") > 1)["sd"].to_list() if v is not None]
+        if len(means) < 2 or not sds:
+            continue
+        sigma = sum(sds) / len(sds)
+        spread = max(means) - min(means)
+        rows.append((corpus, arch, len(means), spread, sigma, spread / sigma))
+
+    if not rows:
+        return []
+
+    lines = [
+        "## Can the cells be ranked?",
+        "",
+        "| corpus | arch | cells | range | seed σ | range / σ | noise bar | verdict |",
+        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | :--- |",
+    ]
+    for corpus, arch, n, spread, sigma, ratio in rows:
+        bar = expected_range(n)
+        lines.append(
+            f"| {corpus} | {arch} | {n} | {spread:.4f} | {sigma:.4f} | {ratio:.2f} | "
+            f"{bar:.2f} | " + ("**above noise**" if ratio > bar else "within noise") + " |"
+        )
+    lines += [
+        "",
+        "*Range across the cell means over the seed sd pooled across cells. The bar is "
+        "E[range] of that many draws from pure noise -- nine identical cells still spread, "
+        "so the comparison is against ~3σ, not 0. Above the bar the matrix carries "
+        "structure worth ranking; below it, the best cell is a selection effect.*",
+        "",
+    ]
+    return lines
+
+
+def marginals(df: pl.DataFrame, metric: str) -> list[str]:
+    """The p -> pk -> pkd ladder for each axis, with the step between each rung.
+
+    Steps rather than all three pairwise contrasts: the axes are nested (pk adds velocity
+    and acceleration to p, pkd adds torque to pk), so the question is where along the
+    ladder the gain appears, and consecutive differences answer that directly. The third
+    pairwise contrast is the total, which is the last column.
+
+    Signed as `next - current`, so positive means widening helped. Paired on replicate,
+    averaging over the other axis first -- cells share a seed, and seed spread is several
+    times these effects, so an unpaired view buries them.
+    """
+
+    steps = [(AXIS[i], AXIS[i + 1]) for i in range(len(AXIS) - 1)]
+
+    def paired(group, axis, lo, hi):
+        """Mean of (hi - lo) over replicates, with its two-sided paired p."""
+
+        wide = (
+            group.group_by("replicate", axis)
+            .agg(pl.col(metric).mean())
+            .pivot(on=axis, index="replicate", values=metric)
+            .drop_nulls()
+        )
+        if lo not in wide.columns or hi not in wide.columns or wide.height < 2:
+            return None, None, 0
+        diff = (wide[hi] - wide[lo]).to_list()
+        n = len(diff)
+        mean = sum(diff) / n
+        sd = (sum((d - mean) ** 2 for d in diff) / (n - 1)) ** 0.5
+        if sd == 0:
+            return mean, None, n
+        t = mean / (sd / n**0.5)
+        return mean, float(2 * stats.t.sf(abs(t), n - 1)), n
+
+    rows, pairs = [], 0
+    for (corpus, arch), group in sorted(df.group_by("corpus", "arch")):
+        if group.group_by("cell").len()["len"].max() < 2:
+            continue
+        for axis in ("input", "loss"):
+            levels = {
+                r[axis]: r[metric]
+                for r in group.group_by(axis).agg(pl.col(metric).mean()).iter_rows(named=True)
+            }
+            measured = [paired(group, axis, lo, hi) for lo, hi in steps]
+            total = paired(group, axis, AXIS[0], AXIS[-1])
+            pairs = max(pairs, total[2], *(m[2] for m in measured))
+            rows.append((corpus, arch, axis, levels, measured, total))
+
+    if not rows:
+        return []
+
+    # Corrected over every step and total shown, the whole scanned family.
+    tests = sum(len(r[4]) + 1 for r in rows)
+
+    def cell(entry):
+        mean, pv, n = entry
+        if mean is None:
+            return "--"
+        if pv is None:
+            return f"{mean:+.4f}"
+        text = "<0.001" if pv < 0.001 else f"={pv:.3f}"
+        return (f"**{mean:+.4f}**" if pv < 0.05 / tests else f"{mean:+.4f}") + f" (p{text})"
+
+    def step_cell(entry):
+        mean, pv, n = entry
+        if mean is None:
+            return "--"
+        if pv is None:
+            return f"{mean:+.4f}"
+        text = "<0.001" if pv < 0.001 else f"{pv:.3f}"
+        return (f"**{mean:+.4f}**" if pv < 0.05 / tests else f"{mean:+.4f}") + f" ({text})"
+
+    lines = [
+        "## Marginal level of each axis",
+        "",
+        "| corpus | arch | axis | " + " | ".join(f"`{lv}`" for lv in AXIS) + " |",
+        "| :--- | :--- | :--- |" + " ---: |" * len(AXIS),
+    ]
+    for corpus, arch, axis, levels, _, _ in rows:
+        lines.append(
+            f"| {corpus} | {arch} | {axis} | "
+            + " | ".join(f"{levels[lv]:.4f}" if lv in levels else "--" for lv in AXIS)
+            + " |"
+        )
+    lines += [
+        "",
+        "*Each value averages over the other axis. Levels only -- whether a difference "
+        "between them is real is the next table.*",
+        "",
+        "## Where along the ladder the gain appears",
+        "",
+        "| corpus | arch | axis | "
+        + " | ".join(f"`{lo}`→`{hi}`" for lo, hi in steps)
+        + f" | total `{AXIS[0]}`→`{AXIS[-1]}` |",
+        "| :--- | :--- | :--- |" + " ---: |" * (len(steps) + 1),
+    ]
+    for corpus, arch, axis, _, measured, total in rows:
+        lines.append(
+            f"| {corpus} | {arch} | {axis} | "
+            + " | ".join(step_cell(e) for e in [*measured, total])
+            + " |"
+        )
+    lines += [
+        "",
+        f"*Paired step to the next rung, signed so positive means widening helped. Cells "
+        f"share a seed and seed spread is several times these effects, so each step is "
+        f"paired on replicate (n = {pairs}) rather than compared as independent means. "
+        f"Parenthesis is the two-sided paired p; bold is significant at 0.05 "
+        f"Bonferroni-corrected over the {tests} steps and totals shown. At three "
+        "replicates a p rests on two degrees of freedom -- read direction and magnitude "
+        "before decisions.*",
+        "",
+    ]
+    return lines
 
 
 def best_cells(df: pl.DataFrame) -> str:
@@ -278,7 +479,14 @@ def reference_points(df: pl.DataFrame) -> list[str]:
 
 def tables(df: pl.DataFrame) -> str:
     corpora = sorted(df["corpus"].unique())
-    parts = [f"*{len(df)} cells across {len(corpora)} corpora. Regenerate with `gen.py`.*", ""]
+    parts = [
+        f"*{len(df)} cells across {len(corpora)} corpora. Regenerate with `gen.py`.*",
+        "",
+        "*In the matrices, the percentage beside each cell is its relative difference from "
+        "the best cell of that table: `(cell - best) / best`. It is within-table only, so it "
+        "compares cells to each other and never across corpora or architectures.*",
+        "",
+    ]
 
     for metric in REPORTED:
         parts += [f"## {TITLES.get(metric, metric)}", ""]
@@ -294,9 +502,21 @@ def tables(df: pl.DataFrame) -> str:
         if len(corpora) > 1:
             base = corpora[0]
             for other in corpora[1:]:
-                table, note = delta(df, base, other, metric)
-                parts += [f"### Delta, `{other}` − `{base}`", "", table, "", note, ""]
+                # Per architecture, and only where both corpora have it: a corpus-to-corpus
+                # delta that averaged medium over thindec would be reporting the decoder
+                # ablation as a data effect.
+                shared = sorted(
+                    set(df.filter(pl.col("corpus") == base)["arch"])
+                    & set(df.filter(pl.col("corpus") == other)["arch"])
+                )
+                for arch in shared:
+                    table, note = delta(df, base, other, arch, metric)
+                    parts += [
+                        f"### Delta, `{other}` − `{base}` ({arch})", "", table, "", note, "",
+                    ]
 
+    parts += rankability(df, REPORTED[0])
+    parts += marginals(df, REPORTED[0])
     parts += ["## Best cell per corpus", "", best_cells(df), ""]
 
     # Seed spread is the number every cell-to-cell and corpus-to-corpus claim has to clear.
