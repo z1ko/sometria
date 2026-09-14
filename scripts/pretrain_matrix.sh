@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# 3x3 MAE pretraining sweep -- encoder input channels x reconstruction/loss channels --
-# for one (corpus, architecture, epoch budget) point.
+# Pretraining sweep over encoder input channels, for one (corpus, architecture, epoch
+# budget, objective) point.
+#
+# 3x3 for MAE -- input channels x reconstruction/loss channels. 3x1 for JEPA, which scores
+# an EMA teacher's embedding and so has no reconstruction target to vary. The shape is read
+# off the base config rather than switched by hand; see `loss_names` below.
 #
 #   ./scripts/pretrain_matrix.sh
 #   CORPUS=amass_motionx_complete ARCH=medium EPOCHS=100 ./scripts/pretrain_matrix.sh
@@ -8,7 +12,8 @@
 #
 # The output path is derived, never typed:
 #
-#   runs/pretrain/<corpus>/<arch>_<epochs>ep/in_<x>__loss_<y>
+#   runs/pretrain/<corpus>/<arch>_<epochs>ep/in_<x>__loss_<y>          MAE
+#   runs/pretrain/<corpus>/<arch>_<epochs>ep_<objective>/in_<x>        anything else
 #
 # Every dimension gets a slot and none is optional. That is the whole point: the old flat
 # names marked MotionX with a `_with_motionx` suffix and marked AMASS-only with nothing, so
@@ -37,6 +42,18 @@ BASE=${BASE:-config/pretrain_mae.yaml}
 DATALOADER=${DATALOADER:-config/dataloader/${CORPUS}.yaml}
 SIZE=${SIZE:-config/mae/${ARCH}.yaml}
 
+# The objective is a dimension like any other and gets a path slot -- but only when it is
+# not MAE. The asymmetry is deliberate and is the one place this script breaks its own
+# rule: every MAE run already on disk lives at the unsuffixed path and the `done` marker is
+# keyed on that path, so adding a slot unconditionally would orphan every finished run and
+# re-run the lot. New objectives pay for the slot; the incumbent keeps its directories.
+# Read from the config rather than from the filename because `model.name` is what train.py
+# actually dispatches on.
+OBJECTIVE=$(sed -n 's/^[[:space:]]*name:[[:space:]]*\([a-z0-9_]*\).*/\1/p' "$BASE" | head -1)
+OBJECTIVE=${OBJECTIVE:-mae}
+SUFFIX=""
+[ "$OBJECTIVE" != "mae" ] && SUFFIX="_$OBJECTIVE"
+
 # Replicates. SEEDS is a space-separated list, not a count, because a count can only ever
 # mean "1..N from scratch" -- a list also expresses "add seed 4 to the three I already
 # have", which is what actually happens once a first pass looks marginal.
@@ -54,12 +71,16 @@ SIZE=${SIZE:-config/mae/${ARCH}.yaml}
 #
 # Pretraining-seed spread is the largest unmeasured source of variance in the matrix:
 # every cell is a single run today, so a corpus-to-corpus delta of a few thousandths has
-# nothing to be compared against. Nine runs per seed, so budget accordingly.
-# Which of the nine cells to run. Empty means all of them; a space-separated list of
-# in_<x>__loss_<y> names runs only those, which is what an ablation aimed at one row of
-# the matrix wants rather than eight runs it will not read.
+# nothing to be compared against. Nine runs per seed for MAE, three for JEPA, so budget
+# accordingly.
+
+# Which cells to run. Empty means all of them; a space-separated list of cell names runs
+# only those, which is what an ablation aimed at one row wants rather than eight runs it
+# will not read. The names are whatever this objective produces -- `in_<x>__loss_<y>` when
+# there is a loss axis, plain `in_<x>` when there is not.
 #
 #   CELLS="in_pk__loss_pk in_pk__loss_pkd" ./scripts/pretrain_matrix.sh
+#   BASE=config/pretrain_jepa.yaml CELLS="in_pk" ./scripts/pretrain_matrix.sh
 CELLS=${CELLS:-}
 
 SEEDS=${SEEDS:-}
@@ -71,7 +92,7 @@ fi
 
 # The base path. The seed segment is appended per replicate below, so overriding RUNS
 # still nests replicates underneath it rather than collapsing them onto each other.
-RUNS=${RUNS:-runs/pretrain/${CORPUS}/${ARCH}_${EPOCHS}ep}
+RUNS=${RUNS:-runs/pretrain/${CORPUS}/${ARCH}_${EPOCHS}ep${SUFFIX}}
 DRY=${DRY:-}
 
 for config in "$BASE" "$DATALOADER" "$SIZE"; do
@@ -82,6 +103,21 @@ done
 
 names=(p pk pkd)
 channels=("[0,1]" "[0,1,2,3]" "[0,1,2,3,4]")
+
+# Whether this objective has a loss axis at all. MAE reconstructs channels, so input x loss
+# is a real 3x3. JEPA's target is an embedding and its constructor takes no
+# `channels_output`, so the same sweep is three cells -- and passing the override anyway is
+# not merely wasteful, it is a TypeError on the first cell. Detected from the base config
+# because BASE already decides the objective, and a second switch saying the same thing is
+# a second thing to get out of sync.
+# Anchored to a real YAML key, not the bare word: `config/pretrain_jepa.yaml` explains in a
+# comment that it *has* no channels_output, and a loose grep matches that comment and
+# cheerfully rebuilds the nine-cell sweep it was meant to collapse.
+if grep -qE '^[[:space:]]*channels_output[[:space:]]*:' "$BASE"; then
+    loss_names=("${names[@]}")
+else
+    loss_names=("")
+fi
 
 run() {
     if [ -n "$DRY" ]; then
@@ -105,7 +141,8 @@ done_already() {
 echo "corpus     $CORPUS  ($DATALOADER)"
 echo "arch       $ARCH  ($SIZE)"
 echo "epochs     $EPOCHS"
-echo "cells      ${CELLS:-<all nine>}"
+echo "objective  $OBJECTIVE  ($BASE)"
+echo "cells      ${CELLS:-<all $(( ${#names[@]} * ${#loss_names[@]} ))>}"
 echo "seeds      ${SEEDS:-<base config default, canonical run>}"
 echo "output     $RUNS"
 echo
@@ -115,8 +152,12 @@ for seed in "${seeds[@]}"; do
     [ -n "$seed" ] && echo "== seed $seed -> $root"
 
     for i in "${!names[@]}"; do
-        for j in "${!names[@]}"; do
-            name="in_${names[$i]}__loss_${names[$j]}"
+        for j in "${!loss_names[@]}"; do
+            if [ -n "${loss_names[$j]}" ]; then
+                name="in_${names[$i]}__loss_${loss_names[$j]}"
+            else
+                name="in_${names[$i]}"
+            fi
             if [ -n "$CELLS" ] && [[ " $CELLS " != *" $name "* ]]; then continue; fi
             out="$root/$name"
             done_already "$out" && continue
@@ -128,7 +169,7 @@ for seed in "${seeds[@]}"; do
                 "training.epochs=$EPOCHS" \
                 ${seed:+"training.seed=$seed"} \
                 "model.channels_input=${channels[$i]}" \
-                "model.channels_output=${channels[$j]}"
+                ${loss_names[$j]:+"model.channels_output=${channels[$j]}"}
         done
     done
 done

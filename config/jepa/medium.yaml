@@ -1,0 +1,5 @@
+model:
+  dim: 256
+  enc_depth: 6
+  dec_depth: 3
+  num_heads: 8
