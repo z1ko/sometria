@@ -1,0 +1,52 @@
+# SimMIM pretraining. Same dataloader, masking, encoder and optimizer as
+# `pretrain_mae.yaml`; the difference is where the mask enters and what reads it out. MAE
+# drops the held-out tokens before the encoder and rebuilds them in a transformer decoder,
+# SimMIM replaces them with a learned token inside the encoder's input and reads the patch
+# values back with one linear layer.
+#
+# Both carry `channels_input` and `channels_output`, so this runs the full 3x3 channel
+# matrix that JEPA cannot -- JEPA has no reconstruction target, so it only ever replicates
+# the input axis. SimMIM is the only second read available on the loss-channel axis.
+
+dataloader:
+  root: data/processed
+  human: config/human.yaml
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_stats_train_clean.pt
+  num_workers: 4
+  window_frames: 240
+  batch_size: 200
+  train:
+    source_datasets: ["AMASS"]
+    split_set: pretrain_v1
+    split: train
+  val:
+    source_datasets: ["AMASS"]
+    split_set: babel_official
+    split: val
+
+model:
+  name: simmim
+  num_dofs: 43
+  num_frames_in_patch: 8
+  num_frames: 240
+  enc_depth: 8
+  # No dec_depth/dec_dim: the head is a single Linear, per the paper's Table 2, where it
+  # ties a 2-layer MLP at 82.8 for 0.8x the cost and beats both inverse-Swin decoders.
+  mask_ratio: 0.9
+  min_lr_ratio: 0.5
+  warmup: 0.05
+  weight_decay: 0.05
+  mlp_ratio: 4
+  channels_input: [0, 1, 2, 3, 4]
+  channels_output: [0, 1, 2, 3, 4]
+  num_heads: 8
+  dim: 256
+  lr: 1e-3
+
+training:
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  epochs: 100
+  seed: 42
+  # val/loss is a real quality signal here, unlike JEPA: the target is the input's own
+  # patch values, so there is no collapsed solution that drives the loss to zero.

@@ -1,0 +1,7 @@
+# Its own tree rather than reusing `config/mae/medium.yaml`, because SimMIM has no decoder
+# to size and those files all set `dec_depth`. Keep the shared dimensions in step with
+# config/mae/medium.yaml: the channel matrix compares the two, so the encoder has to match.
+model:
+  dim: 256
+  enc_depth: 6
+  num_heads: 8

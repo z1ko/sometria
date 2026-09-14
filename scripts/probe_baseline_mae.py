@@ -17,6 +17,7 @@ from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
 from sometria.models.baseline import MAE
 from sometria.models.jepa2 import JEPA
+from sometria.models.simmim import SimMIM
 
 
 def load_pretrained(checkpoint: Path | str, map_location: str = "cpu") -> L.LightningModule:
@@ -29,15 +30,23 @@ def load_pretrained(checkpoint: Path | str, map_location: str = "cpu") -> L.Ligh
     checkpoints get copied and renamed by the matrix shell scripts and a name that lies
     would otherwise surface as a shape error deep inside ``load_state_dict``.
 
-    JEPA probes its EMA teacher, so it carries two encoders and MAE one; the teacher's
-    prefix appears in no MAE checkpoint, which is the whole test.
+    Each objective is keyed on a prefix the others cannot have. JEPA probes its EMA teacher,
+    so it is the only one carrying two encoders. SimMIM reads the patch values back with a
+    single `head` layer where MAE uses a `decoder` stack -- and note that MAE and SimMIM both
+    carry an `encoder.` prefix, so `encoder.` itself discriminates nothing and the test has to
+    be on what sits above it.
     """
 
     # `weights_only` + `mmap` because this read only ever looks at key *names*: it keeps the
     # tensors off the heap and skips the arbitrary-pickle path, and the real load happens a
     # line later anyway.
     state = t.load(checkpoint, map_location=map_location, weights_only=True, mmap=True)["state_dict"]
-    objective = JEPA if any(key.startswith("encoder_teacher.") for key in state) else MAE
+    if any(key.startswith("encoder_teacher.") for key in state):
+        objective = JEPA
+    elif any(key.startswith("head.") for key in state):
+        objective = SimMIM
+    else:
+        objective = MAE
     return objective.load_from_checkpoint(checkpoint, map_location=map_location)
 
 

@@ -40,7 +40,6 @@ EPOCHS=${EPOCHS:-100}
 # and the size config overrides the model dimensions only.
 BASE=${BASE:-config/pretrain_mae.yaml}
 DATALOADER=${DATALOADER:-config/dataloader/${CORPUS}.yaml}
-SIZE=${SIZE:-config/mae/${ARCH}.yaml}
 
 # The objective is a dimension like any other and gets a path slot -- but only when it is
 # not MAE. The asymmetry is deliberate and is the one place this script breaks its own
@@ -53,6 +52,24 @@ OBJECTIVE=$(sed -n 's/^[[:space:]]*name:[[:space:]]*\([a-z0-9_]*\).*/\1/p' "$BAS
 OBJECTIVE=${OBJECTIVE:-mae}
 SUFFIX=""
 [ "$OBJECTIVE" != "mae" ] && SUFFIX="_$OBJECTIVE"
+
+# The size overlay prefers the objective's own tree, and falls back to the MAE one when
+# that arch has no per-objective file.
+#
+# The split exists for SimMIM alone: every `config/mae/*.yaml` sets `dec_depth`, and SimMIM
+# has no decoder to size and rejects it. JEPA takes `dec_depth` happily, so it has no reason
+# to need a full parallel tree -- and without the fallback, `ARCH=tiny` under JEPA would
+# stop resolving the moment `config/jepa/` gained a single file, which is a silly way to
+# break six working arches.
+#
+# The fallback only applies to the default. An explicitly passed SIZE is used as given and
+# fails the existence check below if it is wrong, rather than being quietly swapped for
+# something else. A SimMIM arch with no overlay of its own lands on the MAE file and dies at
+# construction with "unexpected keyword argument 'dec_depth'", which names its own fix.
+if [ -z "${SIZE:-}" ]; then
+    SIZE=config/${OBJECTIVE}/${ARCH}.yaml
+    [ -f "$SIZE" ] || SIZE=config/mae/${ARCH}.yaml
+fi
 
 # Replicates. SEEDS is a space-separated list, not a count, because a count can only ever
 # mean "1..N from scratch" -- a list also expresses "add seed 4 to the three I already

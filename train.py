@@ -10,11 +10,12 @@ from omegaconf import DictConfig, OmegaConf
 from sometria.dataset import MotionDataModule
 from sometria.models.baseline import MAE
 from sometria.models.jepa2 import JEPA
+from sometria.models.simmim import SimMIM
 
 # `model.name` selects the pretext objective; everything below it in the config block is
 # the objective's own constructor arguments. MAE stays the default so every config written
 # before JEPA existed still builds the model it always did.
-MODELS: dict[str, type[L.LightningModule]] = {"mae": MAE, "jepa": JEPA}
+MODELS: dict[str, type[L.LightningModule]] = {"mae": MAE, "jepa": JEPA, "simmim": SimMIM}
 
 
 def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]:
