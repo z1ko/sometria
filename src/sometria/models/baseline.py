@@ -111,6 +111,7 @@ class Decoder(nn.Module):
         heads: int,
         mlp_ratio: int,
         dec_dim: int | None = None,
+        out_dim: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -126,7 +127,18 @@ class Decoder(nn.Module):
         # checkpoint written before this argument existed still loads key for key.
         self.embed = nn.Identity() if width == dim else nn.Linear(dim, width)
 
-        self.proj = nn.Linear(width, num_frames_in_patch * len(channels_output))
+        # `out_dim` replaces the reconstruction head. MAE projects a token back to its patch
+        # values; JEPA projects it into the encoder's embedding space, to be scored against
+        # a teacher embedding instead of against the input. None keeps the MAE head, so the
+        # state_dict of every checkpoint written before this argument existed is unchanged
+        # -- the `out_dim is None` branch is byte-for-byte what it always was.
+        if out_dim is None:
+            self.proj = nn.Linear(width, num_frames_in_patch * len(channels_output))
+        else:
+            # Identity when the widths already agree, for the same reason `embed` is one:
+            # it holds no parameters. S-JEPA's predictor likewise ends at the encoder width
+            # (Cp = Ce = 256) with no final projection.
+            self.proj = nn.Identity() if out_dim == width else nn.Linear(width, out_dim)
         self.blocks = _encode_layers(width, heads, mlp_ratio, depth)
 
         # Target tokens to generate

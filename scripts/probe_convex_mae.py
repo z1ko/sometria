@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Evaluate a BABEL60 convex probe (mean-pool + L-BFGS logistic regression) on a MAE checkpoint.
+"""Evaluate a BABEL60 convex probe (mean-pool + L-BFGS logistic regression) on a pretrained checkpoint.
 
 Same config/checkpoint contract as ``probe_baseline_mae.py``, but the head is fit to
 convergence with :class:`~sometria.downstream.classifier_convex.MotionConvexClassifier`
@@ -35,13 +35,14 @@ from sometria.downstream.classifier_convex import (
 )
 from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
-from sometria.models.baseline import MAE
+
+from probe_baseline_mae import load_pretrained
 
 
 class BaselineBackbone(nn.Module):
-    """Adapter: baseline.MAE encoder shaped like the downstream classifier expects."""
+    """Adapter: a pretrained encoder shaped like the downstream classifier expects."""
 
-    def __init__(self, mae: MAE) -> None:
+    def __init__(self, mae: L.LightningModule) -> None:
         super().__init__()
         self.mae = mae
         self.spec = SimpleNamespace(d_model=mae.hparams.dim, num_dofs=mae.hparams.num_dofs)
@@ -76,7 +77,7 @@ def run_probe(config, checkpoint: Path, device: str) -> dict:
     t.set_float32_matmul_precision("high")
     _, num_labels = load_label_vocabulary_index(config.dataloader.root, config.dataloader.label_set)
 
-    mae = MAE.load_from_checkpoint(checkpoint, map_location="cpu")
+    mae = load_pretrained(checkpoint)
     model = MotionConvexClassifier(
         BaselineBackbone(mae),
         num_labels=num_labels,
@@ -117,7 +118,7 @@ def run_probe(config, checkpoint: Path, device: str) -> dict:
 
 def main() -> None:
     parser = ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, required=True, help="MAE checkpoint or run directory")
+    parser.add_argument("--checkpoint", type=Path, required=True, help="pretrained checkpoint or run directory")
     parser.add_argument("--config", type=Path, default=Path("config/experiment_linear_probe.yaml"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", type=str, default="cuda" if t.cuda.is_available() else "cpu")

@@ -32,12 +32,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import label_analysis as legacy_label_analysis  # noqa: E402
 from moments_baseline import channel_slice, collect as collect_moments, evaluate, train_head  # noqa: E402
-from probe_baseline_mae import BaselineBackbone  # noqa: E402
+from probe_baseline_mae import BaselineBackbone, load_pretrained  # noqa: E402
 
 from sometria.downstream.classifier import MotionLinearClassifier  # noqa: E402
 from sometria.downstream.dataset import LabelledMotionDataModule  # noqa: E402
 from sometria.downstream.labels import load_label_vocabulary_index  # noqa: E402
-from sometria.models.baseline import MAE  # noqa: E402
 from sometria.viz import collect_predictions, label_names, per_label_ap  # noqa: E402
 
 INPUTS = ("p", "pk", "pkd")
@@ -95,7 +94,7 @@ def load_probe(run: Path, device: str) -> tuple[MotionLinearClassifier, Labelled
     OmegaConf.update(config, "dataloader.num_workers", 0)
     _, num_labels = load_label_vocabulary_index(config.dataloader.root, config.dataloader.label_set)
 
-    mae = MAE.load_from_checkpoint(config.model.checkpoint, map_location="cpu")
+    mae = load_pretrained(config.model.checkpoint)
     model = MotionLinearClassifier(
         BaselineBackbone(mae),
         num_labels=num_labels,

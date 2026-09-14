@@ -9,11 +9,20 @@ from omegaconf import DictConfig, OmegaConf
 
 from sometria.dataset import MotionDataModule
 from sometria.models.baseline import MAE
+from sometria.models.jepa2 import JEPA
+
+# `model.name` selects the pretext objective; everything below it in the config block is
+# the objective's own constructor arguments. MAE stays the default so every config written
+# before JEPA existed still builds the model it always did.
+MODELS: dict[str, type[L.LightningModule]] = {"mae": MAE, "jepa": JEPA}
 
 
 def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]:
     model_config = OmegaConf.to_container(config.model, resolve=True)
-    return MAE(**model_config), MotionDataModule(config)  # type: ignore[arg-type]
+    name = model_config.pop("name", "mae")  # type: ignore[union-attr]
+    if name not in MODELS:
+        raise SystemExit(f"unknown model.name {name!r}; expected one of {sorted(MODELS)}")
+    return MODELS[name](**model_config), MotionDataModule(config)  # type: ignore[arg-type]
 
 
 def train(config: DictConfig, output: Path):
@@ -24,6 +33,10 @@ def train(config: DictConfig, output: Path):
 
     model, datamodule = build(config)
     monitor = config.training.get("monitor", "val/loss")
+    # The `endswith("loss")` guess below is wrong for any metric that is not named for a
+    # loss -- `val/loss_over_null` ends in "null", so it would be maximized, selecting the
+    # *most* collapsed JEPA checkpoint. An explicit key beats a cleverer guess.
+    mode = config.training.get("monitor_mode", "min" if monitor.endswith("loss") else "max")
 
     trainer = L.Trainer(
         accelerator="auto",
@@ -39,7 +52,7 @@ def train(config: DictConfig, output: Path):
             LearningRateMonitor(logging_interval="step"),
             ModelCheckpoint(
                 monitor=monitor,
-                mode="min" if monitor.endswith("loss") else "max",
+                mode=mode,
                 save_top_k=1,
                 save_last=False,
             ),

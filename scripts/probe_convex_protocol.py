@@ -69,8 +69,8 @@ from sometria.downstream.classifier_convex import (
 )
 from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
-from sometria.models.baseline import MAE
 
+from probe_baseline_mae import load_pretrained
 from probe_convex_mae import BaselineBackbone, latest_checkpoint
 
 
@@ -225,7 +225,7 @@ def main() -> None:
     OmegaConf.save(config, args.output / "config.yaml")
 
     _, num_labels = load_label_vocabulary_index(root, config.dataloader.label_set)
-    mae = MAE.load_from_checkpoint(checkpoint, map_location="cpu")
+    mae = load_pretrained(checkpoint)
     model = MotionConvexClassifier(
         BaselineBackbone(mae), num_labels=num_labels, pool=config.model.get("pool", "mean")
     )

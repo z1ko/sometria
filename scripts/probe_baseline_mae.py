@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Train a BABEL60 probe on a baseline.py MAE checkpoint."""
+"""Train a BABEL60 probe on a pretrained checkpoint."""
 
 from argparse import ArgumentParser
 from pathlib import Path
@@ -16,12 +16,35 @@ from sometria.downstream.classifier import MotionLinearClassifier
 from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
 from sometria.models.baseline import MAE
+from sometria.models.jepa2 import JEPA
+
+
+def load_pretrained(checkpoint: Path | str, map_location: str = "cpu") -> L.LightningModule:
+    """Load a pretraining checkpoint as whichever objective wrote it.
+
+    The probes only ever reach for ``.encode`` and ``.hparams``, which every objective here
+    exposes the same way, so which one pretrained a checkpoint is an implementation detail
+    everywhere downstream -- except that Lightning needs the concrete class to rebuild the
+    module. That class is read off the weights rather than off a flag or the path, because
+    checkpoints get copied and renamed by the matrix shell scripts and a name that lies
+    would otherwise surface as a shape error deep inside ``load_state_dict``.
+
+    JEPA probes its EMA teacher, so it carries two encoders and MAE one; the teacher's
+    prefix appears in no MAE checkpoint, which is the whole test.
+    """
+
+    # `weights_only` + `mmap` because this read only ever looks at key *names*: it keeps the
+    # tensors off the heap and skips the arbitrary-pickle path, and the real load happens a
+    # line later anyway.
+    state = t.load(checkpoint, map_location=map_location, weights_only=True, mmap=True)["state_dict"]
+    objective = JEPA if any(key.startswith("encoder_teacher.") for key in state) else MAE
+    return objective.load_from_checkpoint(checkpoint, map_location=map_location)
 
 
 class BaselineBackbone(nn.Module):
-    """Adapter: baseline.MAE encoder shaped like downstream classifier expects."""
+    """Adapter: a pretrained encoder shaped like the downstream classifier expects."""
 
-    def __init__(self, mae: MAE) -> None:
+    def __init__(self, mae: L.LightningModule) -> None:
         super().__init__()
         self.mae = mae
         self.spec = SimpleNamespace(d_model=mae.hparams.dim, num_dofs=mae.hparams.num_dofs)
@@ -51,7 +74,7 @@ def train_probe(config, checkpoint: Path, output: Path):
     L.seed_everything(config.training.seed, workers=True)
 
     _, num_labels = load_label_vocabulary_index(config.dataloader.root, config.dataloader.label_set)
-    mae = MAE.load_from_checkpoint(checkpoint, map_location="cpu")
+    mae = load_pretrained(checkpoint)
     model = MotionLinearClassifier(
         BaselineBackbone(mae),
         num_labels=num_labels,
@@ -90,7 +113,7 @@ def train_probe(config, checkpoint: Path, output: Path):
 
 def main() -> None:
     parser = ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, required=True, help="MAE checkpoint or run directory")
+    parser.add_argument("--checkpoint", type=Path, required=True, help="pretrained checkpoint or run directory")
     parser.add_argument("--config", type=Path, default=Path("config/experiment_linear_probe.yaml"))
     parser.add_argument("--output", type=Path, required=True)
     args, overrides = parser.parse_known_args()
