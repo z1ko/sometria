@@ -77,7 +77,10 @@ def collect() -> pl.DataFrame:
     # rglob, not a fixed-depth glob: replicates nest an extra segment or two
     # (corpus/arch/seed1/cell, corpus/arch/seed1/rep2/cell) and a fixed depth would find
     # the canonical runs and silently skip every replicate.
-    for metrics_path in sorted(RUNS.rglob("in_*__loss_*/metrics.json")):
+    # `in_*`, not `in_*__loss_*`: an objective that reconstructs nothing names its cells
+    # for their input channels alone, and the narrower glob made every JEPA run invisible
+    # here rather than raising.
+    for metrics_path in sorted(RUNS.rglob("in_*/metrics.json")):
         cell = metrics_path.parent
         parts = cell.relative_to(RUNS).parts
         if len(parts) < 3:
@@ -96,7 +99,10 @@ def collect() -> pl.DataFrame:
                 "replicate": "/".join(parts[2:-1]),
                 "cell": name,
                 "input": name.removeprefix("in_").split("__")[0],
-                "loss": name.split("__loss_")[1],
+                # None where the objective has no reconstruction target. Null rather than
+                # a sentinel string so it groups, sorts and renders as missing everywhere
+                # downstream instead of pretending to be a fourth channel set.
+                "loss": name.split("__loss_")[1] if "__loss_" in name else None,
                 "weight_decay": payload["weight_decay"],
                 **{key: payload["metrics"][key] for key in METRICS},
                 # Which statistics the frozen backbone was fed. A probe read under the wrong
@@ -115,14 +121,58 @@ def collect() -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
+def has_loss_axis(df: pl.DataFrame) -> bool:
+    """Whether this subset's objective reconstructs channels at all.
+
+    MAE and SimMIM do, so their cells are `in_<x>__loss_<y>` and the natural table is the
+    3x3. JEPA predicts an EMA teacher's embedding and has no reconstruction target, so its
+    cells are plain `in_<x>` and there is one axis to tabulate rather than two -- which also
+    means it can only ever replicate the input-channel finding, never the loss-channel one.
+
+    Read off the rows rather than off the architecture name: the name is a directory naming
+    convention that could change, this is a fact about what was run.
+    """
+
+    return df["loss"].null_count() < len(df)
+
+
+def ladder(df: pl.DataFrame, metric: str) -> str:
+    """The input axis alone, for an objective with no loss axis to cross it against."""
+
+    stats = {}
+    for (inp,), group in df.group_by("input"):
+        values = group[metric]
+        stats[inp] = (values.mean(), values.std() if len(values) > 1 else None)
+    best = max(mean for mean, _ in stats.values())
+
+    lines = [f"| Input | {TITLES.get(metric, metric)} |", "| :--- | :---: |"]
+    for row in AXIS:
+        entry = stats.get(row)
+        if entry is None:
+            lines.append(f"| **{row}** | -- |")
+            continue
+        mean, sd = entry
+        text = f"**{mean:.4f}**" if mean == best else f"{mean:.4f}"
+        if sd is not None:
+            text += f" ±{sd:.4f}"
+        lines.append(f"| **{row}** | {text} ({(mean - best) / best:+.1%}) |")
+    return "\n".join(lines)
+
+
 def matrix(df: pl.DataFrame, metric: str) -> str:
     """A 3x3 input-by-loss table, bolding the best cell.
+
+    Falls back to a single column when the objective has no loss axis; see
+    :func:`has_loss_axis`.
 
     Cells hold the mean over whatever replicates exist, with the sample standard deviation
     beside it once there is more than one. A single number with no spread beside it is a
     single run, and should be read as such. The percentage is the cell's shortfall against
     the best cell of the same table.
     """
+
+    if not has_loss_axis(df):
+        return ladder(df, metric)
 
     stats = {}
     for (inp, loss), group in df.group_by("input", "loss"):
@@ -199,13 +249,17 @@ def delta(df: pl.DataFrame, base: str, other: str, arch: str, metric: str) -> tu
     sigma = next((x for x in (sigma_a, sigma_b) if x is not None), None)
     se = None if sigma is None else sigma * (1 / n_a + 1 / n_b) ** 0.5
 
+    # The key is (input, loss) either way; an objective with no loss axis just has None in
+    # the second slot, so one column rather than three.
+    columns = AXIS if has_loss_axis(df.filter(pl.col("arch") == arch)) else [None]
+
     lines = [
-        "| Input \\ Loss | " + " | ".join(AXIS) + " |",
-        "| :--- |" + " :---: |" * len(AXIS),
+        "| Input \\ Loss | " + " | ".join(c or "--" for c in columns) + " |",
+        "| :--- |" + " :---: |" * len(columns),
     ]
     for row in AXIS:
         cells = []
-        for col in AXIS:
+        for col in columns:
             key = (row, col)
             if key not in a or key not in b:
                 cells.append("--")
@@ -220,7 +274,10 @@ def delta(df: pl.DataFrame, base: str, other: str, arch: str, metric: str) -> tu
         borrowed = "" if (sigma_a and sigma_b) else f", σ borrowed from `{base if sigma_a else other}`"
         # Derived, not hardcoded: the correction depends on how many cells are compared,
         # and the axis is a constant that could change.
-        cells = len(AXIS) ** 2
+        # Derived from the table actually drawn, not from AXIS squared: a one-axis
+        # objective compares three cells, and correcting as if for nine would set the bar
+        # higher than the family being read.
+        cells = len(AXIS) * len(columns)
         bonferroni = NormalDist().inv_cdf(1 - 0.05 / (2 * cells))
         note = (
             f"*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many "
@@ -344,7 +401,9 @@ def marginals(df: pl.DataFrame, metric: str) -> list[str]:
     for (corpus, arch), group in sorted(df.group_by("corpus", "arch")):
         if group.group_by("cell").len()["len"].max() < 2:
             continue
-        for axis in ("input", "loss"):
+        # `loss` only where there is one. Grouping on an all-null column would otherwise
+        # produce a single row labelled None and report it as a marginal level.
+        for axis in ("input", "loss") if has_loss_axis(group) else ("input",):
             levels = {
                 r[axis]: r[metric]
                 for r in group.group_by(axis).agg(pl.col(metric).mean()).iter_rows(named=True)
@@ -471,7 +530,12 @@ def reference_points(df: pl.DataFrame) -> list[str]:
             f"{entry[m]:.4f}" if entry.get(m) is not None else "--" for m in REPORTED
         )
         lines.append(f"| {name} | {values} | {ratio} | {entry['protocol']} |")
-    lines += ["", f"*Best cell: {best[REPORTED[0]]:.4f} macro mAP.*", ""]
+    lines += [
+        "",
+        f"*Best cell: {best[REPORTED[0]]:.4f} macro mAP, taken over every architecture "
+        "present, so it is the best result on the board rather than the best MAE one.*",
+        "",
+    ]
     lines += [f"- **{name}** -- {entry['note']}" for name, entry in baselines.items()]
     lines += [""]
     return lines
@@ -480,7 +544,13 @@ def reference_points(df: pl.DataFrame) -> list[str]:
 def tables(df: pl.DataFrame) -> str:
     corpora = sorted(df["corpus"].unique())
     parts = [
-        f"*{len(df)} cells across {len(corpora)} corpora. Regenerate with `gen.py`.*",
+        f"*{len(df)} cells across {len(corpora)} corpora and "
+        f"{df['arch'].n_unique()} architectures. Regenerate with `gen.py`.*",
+        "",
+        "*An architecture whose name carries an objective suffix (`_jepa`, `_simmim`) was "
+        "pretrained with that objective; an unsuffixed one is the MAE baseline. JEPA has no "
+        "reconstruction target, so its sections tabulate the input axis alone and it cannot "
+        "speak to the loss-channel axis at all.*",
         "",
         "*In the matrices, the percentage beside each cell is its relative difference from "
         "the best cell of that table: `(cell - best) / best`. It is within-table only, so it "
@@ -495,7 +565,10 @@ def tables(df: pl.DataFrame) -> str:
                 subset = df.filter((pl.col("corpus") == corpus) & (pl.col("arch") == arch))
                 runs = subset.group_by("cell").len()["len"].max()
                 label = f"{runs} seeds" if runs > 1 else "1 seed, no error bar"
-                parts += [f"### `{corpus}` / {arch} ({label})", "", matrix(subset, metric), ""]
+                axes = "" if has_loss_axis(subset) else ", input axis only"
+                parts += [
+                    f"### `{corpus}` / {arch} ({label}{axes})", "", matrix(subset, metric), "",
+                ]
 
         # Only meaningful against a reference corpus; the first alphabetically is the
         # AMASS-only baseline every later corpus adds to.
