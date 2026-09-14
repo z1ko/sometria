@@ -4,10 +4,12 @@ Per file: load the OpenSim CSV using the human model definition, resample onto t
 project-wide target rate, measure quality on the raw kinematic and dynamic channels,
 encode through the representation, and write a tensor plus a catalog row.
 
-There is exactly one ingest path, because every corpus reaches us as OpenSim CSV --
-the conversion happens upstream. ``import_opensim_csv_dataset`` is specific about
-*format*, not about *corpus*: it globs ``*.csv`` and reads ``<dof>_vel`` / ``_acc`` /
-``_tau`` columns.
+Ingest paths are named by *format*, not by corpus. ``import_opensim_csv_dataset`` globs
+``*.csv`` and reads ``<dof>_vel`` / ``_acc`` / ``_tau`` columns, which is how every
+corpus reaches us once the OpenSim conversion upstream has run.
+``import_smpl_dataset`` reads AMASS-style ``.npz`` files instead -- the same takes
+*before* that conversion, kept so the conversion itself can be measured. Both share one
+loop in ``import_dataset``; only the loader differs.
 
 Neighbouring concerns live elsewhere. What the feature channels *mean* belongs to
 ``sometria.representation``; where things are stored and which samples constitute a
@@ -20,6 +22,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 import glob
 from pathlib import Path
+import zipfile
 
 import numpy as np
 import polars as pl
@@ -28,7 +31,7 @@ import torch as t
 import tqdm
 
 from sometria.catalog import CATALOG, motion_path, stable_sample_id, upsert_table
-from sometria.representation import Representation
+from sometria.representation import Representation, SmplRepresentation
 
 # NOTE: Hardcoded paths, no need for more complexity
 PATH_HUMAN_DEFINITION: Path = Path("config/human.yaml")
@@ -128,6 +131,58 @@ def _load_sample(path: str | Path, human: dict) -> dict:
     }
 
 
+# SMPL and SMPL-X agree on the first 22 joints (pelvis, then the body chain), and diverge
+# after them: SMPL-X continues into hands, jaw and eyes. Reading only the body keeps one
+# joint layout across AMASS mirrors, and the joints past it have no OpenSim counterpart.
+SMPL_BODY_JOINTS: int = 22
+
+
+# Load a single sample from an AMASS-style SMPL npz
+def _load_smpl_sample(path: str | Path) -> dict:
+    """Load one AMASS ``.npz`` into raw axis-angle joint rotations and metadata.
+
+    The returned ``motion`` array has shape ``(time, joints, 3)``: one axis-angle
+    rotation per body joint, the raw content of the file. Everything else the file
+    carries -- body shape, marker latents, global translation -- is deliberately dropped,
+    because the OpenSim tensors this is compared against do not carry it either.
+    """
+
+    with np.load(path, allow_pickle=True) as data:
+        if "poses" not in data.files:
+            raise ValueError("no 'poses' array (AMASS ships shape-only files too).")
+
+        poses = np.asarray(data["poses"], dtype=np.float64)
+        # AMASS renamed this key between releases and both mirrors are in the wild.
+        hz = float(next(data[k] for k in ("mocap_frame_rate", "mocap_framerate") if k in data.files))
+
+    if poses.shape[1] < SMPL_BODY_JOINTS * 3:
+        raise ValueError(f"{poses.shape[1]} pose values, fewer than the body's 66.")
+    if len(poses) < 2:
+        raise ValueError(f"{len(poses)} frames, too few to difference.")
+
+    motion = poses[:, : SMPL_BODY_JOINTS * 3].reshape(-1, SMPL_BODY_JOINTS, 3)
+    n_frames = len(motion)
+
+    return {
+        "path": str(path),
+        "motion": motion,
+        # ponytail: same struct as the CSV import writes, so one catalog holds both. A SMPL
+        # file has no subject height or mass -- that comes from the OpenSim scaling step.
+        "metadata": {"subject_height_m": None, "subject_mass_kg": None},
+        "n_frames": n_frames,
+        "duration": n_frames / hz,
+        "hz": hz,
+        "time": np.arange(n_frames) / hz,
+    }
+
+
+# What "this file is not a take" looks like from below. A corrupt or truncated archive raises
+# BadZipFile, which inherits straight from Exception and so slips past ValueError -- one such
+# file in a corpus of 19k used to end the whole import at whatever percent it had reached.
+# Deliberately not `except Exception`: a typo in a loader should still be loud.
+UNREADABLE = (ValueError, OSError, EOFError, zipfile.BadZipFile)
+
+
 # 5 robust sigmas above the median rate.
 TAU_RATE_MAX: float = 3.0e5
 TAU_INDEX: int = 3
@@ -140,10 +195,21 @@ def measure_quality(motion: np.ndarray, hz: float, tau_rate_max: float = TAU_RAT
     whose frame-to-frame rate exceeds ``tau_rate_max``.
     """
 
+    nonfinite = not bool(np.isfinite(motion).all())
+    if motion.shape[-1] <= TAU_INDEX:
+        # No torque channel to check (SMPL carries kinematics only), so finiteness is the
+        # whole test. The tau columns stay in the catalog, as nulls, so one schema serves
+        # both imports.
+        return {
+            "tau_rate": None,
+            "tau_absmax": None,
+            "nonfinite": nonfinite,
+            "broken": nonfinite,
+        }
+
     tau = motion[:, :, TAU_INDEX]
     jump = np.abs(np.diff(tau, axis=0)).max() if len(tau) > 1 else 0.0
     tau_rate = float(jump * hz)
-    nonfinite = not bool(np.isfinite(motion).all())
     return {
         "tau_rate": tau_rate,
         "tau_absmax": float(np.abs(tau).max()),
@@ -179,9 +245,42 @@ class ImportConfig:
 def import_opensim_csv_dataset(
     *, config: ImportConfig, human: dict, representation: Representation
 ) -> pl.DataFrame:
-    """Import OpenSim-style CSV files into processed feature tensors and catalog rows.
+    """Import OpenSim-style CSV files. See :func:`import_dataset`."""
 
-    Each matched CSV becomes one ``.pt`` file under ``motions/<source_dataset>/``.
+    return import_dataset(
+        config=config,
+        representation=representation,
+        load=lambda path: _load_sample(path, human),
+    )
+
+
+def import_smpl_dataset(
+    *, config: ImportConfig, representation: SmplRepresentation
+) -> pl.DataFrame:
+    """Import AMASS-style SMPL ``.npz`` files. See :func:`import_dataset`.
+
+    The point of comparison for the OpenSim import: same corpus, same catalog, same
+    windows, but the joint rotations as the mocap fit produced them, without the
+    anatomical DOFs and the inverse-dynamics torques the OpenSim conversion adds. Give it
+    its own ``source_dataset`` (``"AMASS-SMPL"``) so the two never land in one view --
+    they have different feature shapes, and a view is trained on as a single tensor.
+    """
+
+    return import_dataset(config=config, representation=representation, load=_load_smpl_sample)
+
+
+def import_dataset(
+    *, config: ImportConfig, representation: Representation, load
+) -> pl.DataFrame:
+    """Import raw motion files into processed feature tensors and catalog rows.
+
+    ``load`` turns one path into the raw sample dict the rest of the pipeline expects;
+    it is the only thing that differs between corpora formats. A file it cannot read is
+    skipped and counted rather than raised, because a mirror of 19k files reliably holds a
+    few that are not takes at all -- shape-only fits, truncated downloads -- and losing an
+    hour of import to the last of them is not a useful way to find out.
+
+    Each matched file becomes one ``.pt`` file under ``motions/<source_dataset>/``.
     The tensor payload stores model-ready ``features`` and ``time``. The catalog
     stores provenance, shape information, timing, metadata, and quality metrics,
     with ``representation`` recording which encoding produced the tensors.
@@ -192,11 +291,17 @@ def import_opensim_csv_dataset(
 
     files = sorted(Path(p) for p in glob.glob(search_path, recursive=True))
     if not files:
-        raise FileNotFoundError(f"No CSV files found for pattern: {config.pattern}")
+        raise FileNotFoundError(f"No files found for pattern: {config.pattern}")
 
     rows = []
+    skipped = []
     for path in tqdm.tqdm(files):
-        sample = _load_sample(path, human)
+        try:
+            sample = load(path)
+        except UNREADABLE as error:
+            skipped.append(f"{path}: {type(error).__name__}: {error}")
+            continue
+
         sample = _resample_sample(sample, config.target_hz)
 
         source_path = str(path.relative_to(config.input_root))
@@ -233,5 +338,8 @@ def import_opensim_csv_dataset(
                 **quality,
             }
         )
+
+    if skipped:
+        print(f"skipped {len(skipped)} unreadable files, e.g. {skipped[:3]}")
 
     return upsert_table(config.output_root, CATALOG, pl.DataFrame(rows), keys=["sample_id"])

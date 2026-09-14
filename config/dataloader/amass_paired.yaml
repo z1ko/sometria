@@ -1,0 +1,24 @@
+# The OpenSim arm of the corpus ablation. amass_clean.yaml with one thing changed: the split
+# sets are the paired ones. The conversion ran from the SMPL files and dropped 1,313 takes on
+# the way -- 451 of LARa's 452, 311 of WEIZMANN's -- so pairing takes those away from the SMPL
+# arm and leaves this one alone. Use this config anyway: it is the same corpus under a name
+# that says which comparison it belongs to, and the notebook reports if the pairing did cost
+# this arm anything (a take whose .npz fails to load takes its OpenSim twin with it).
+dataloader:
+  root: data/processed
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_paired_v1_train_clean.pt
+  human: config/human.yaml
+
+  num_workers: 4
+  window_frames: 240
+  batch_size: 200
+
+  train:
+    source_datasets: ["AMASS"]
+    split_set: pretrain_paired_v1
+    split: train
+
+  val:
+    source_datasets: ["AMASS"]
+    split_set: babel_paired
+    split: val

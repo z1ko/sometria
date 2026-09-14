@@ -22,6 +22,7 @@ physical units hand-assembled denormalize + signed_exp.
 from pathlib import Path
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 import torch as t
 import yaml
 
@@ -75,7 +76,12 @@ def channel_names(indices: tuple[int, ...] | None = None) -> tuple[str, ...]:
 
     if indices is None:
         return Representation.channels
-    return tuple(Representation.channels[i] for i in indices)
+    # A model logging channels of another representation (SmplRepresentation has 18) would
+    # otherwise index off the end of this tuple; an unnamed channel logs as its index.
+    return tuple(
+        Representation.channels[i] if i < len(Representation.channels) else f"c{i}"
+        for i in indices
+    )
 
 
 class Representation:
@@ -91,12 +97,13 @@ class Representation:
         self.dofs = dofs
         self._excluded = excluded
 
-        # Which slots carry a compressed, normalizable quantity. sin/cos are already
-        # bounded in [-1, 1] and encode circular geometry, so they are left alone by both
-        # signed_log and mean/std normalization. One mask, one concept: what used to be
-        # feature_log_mask and feature_normalization_mask were byte-identical.
-        self._mask = np.ones((len(dofs), len(self.channels)), dtype=bool)
-        self._mask[:, :2] = False
+        # Which slots carry a compressed, normalizable quantity. The pose channels are
+        # already bounded in [-1, 1] and encode rotation geometry, so they are left alone
+        # by both signed_log and mean/std normalization. One mask, one concept: what used
+        # to be feature_log_mask and feature_normalization_mask were byte-identical.
+        # Read off the channel names so a different layout does not need a new rule.
+        pose = tuple(c.startswith(("sin", "cos", "rot")) for c in self.channels)
+        self._mask = np.tile(np.logical_not(pose), (len(dofs), 1))
 
     @classmethod
     def from_config(cls, path: str | Path) -> "Representation":
@@ -175,3 +182,96 @@ class Representation:
 
         mask = t.as_tensor(self._mask, device=x.device)
         return t.where(mask, x * stats["std"] + stats["mean"], x)
+
+
+# The SMPL feature layout. Named separately from NAME because statistics, tensors and
+# checkpoints computed under one layout are meaningless under the other.
+SMPL_NAME = "smpl_rot6d_log_vel_acc_v1"
+
+
+class SmplRepresentation(Representation):
+    """The SMPL feature layout: per joint, a 6D rotation and its first two derivatives.
+
+    Exists to answer one question -- whether the OpenSim conversion earns its keep --
+    so it copies every choice the OpenSim layout makes that is not about OpenSim: one
+    token per joint, pose channels left uncompressed, derivatives through signed_log,
+    the take's global orientation excluded.
+
+    Two differences are the experiment. A SMPL joint is a ball joint, so its pose is a
+    rotation rather than a scalar angle: it is stored as the first two columns of the
+    rotation matrix (continuous everywhere, unlike axis-angle, which jumps at +-pi)
+    rather than as sin/cos of one angle. And there is no ``tau``: torque comes out of
+    inverse dynamics on a scaled musculoskeletal model, which is exactly what the
+    OpenSim pipeline adds and a SMPL file cannot carry.
+
+    Velocity and acceleration are differences per *frame*, not per second. Everything is
+    resampled to one rate before encoding, so the two differ by a constant, and a
+    constant is absorbed by normalization.
+    """
+
+    channels: tuple[str, ...] = tuple(
+        f"{kind}{i}" for kind in ("rot", "vel", "acc") for i in range(6)
+    )
+
+    def __init__(self, dofs: tuple[str, ...], excluded: tuple[int, ...]) -> None:
+        super().__init__(dofs, excluded)
+        self.name = SMPL_NAME
+
+    @classmethod
+    def from_human(cls, human: dict) -> "SmplRepresentation":
+        """Build the representation from a SMPL joint definition (``config/smpl.yaml``)."""
+
+        joints = human["joints"]
+        index = {joint: i for i, joint in enumerate(joints)}
+        unknown = [j for j in human.get("excluded_joints") or [] if j not in index]
+        if unknown:
+            raise KeyError(f"excluded_joints: not in joints: {unknown}")
+
+        excluded = {index[j] for j in human.get("excluded_joints") or []}
+        kept = tuple(j for i, j in enumerate(joints) if i not in excluded)
+        return cls(kept, tuple(sorted(excluded)))
+
+    def encode(self, motion: np.ndarray) -> np.ndarray:
+        """Axis-angle joint rotations ``(T, joints, 3)`` -> features ``(T, kept, 18)``."""
+
+        kept = np.delete(motion, self._excluded, axis=1)
+        frames, joints, _ = kept.shape
+        if frames < 2:
+            raise ValueError("Need at least two frames to difference; got one.")
+
+        rotation = Rotation.from_rotvec(kept.reshape(-1, 3)).as_matrix()
+        rot6d = rotation[:, :, :2].reshape(frames, joints, 6)
+
+        vel = np.gradient(rot6d, axis=0)
+        acc = np.gradient(vel, axis=0)
+
+        out = np.concatenate([rot6d, vel, acc], axis=-1)
+        return np.where(self._mask, signed_log(out), out)
+
+    def decode(self, features: np.ndarray) -> np.ndarray:
+        """Features ``(T, kept, 18)`` -> axis-angle joint rotations ``(T, kept, 3)``.
+
+        Only the pose channels are inverted: velocity and acceleration are derived from
+        them, so returning them would be returning the same information twice.
+        """
+
+        frames, joints, _ = features.shape
+        # encode flattened a (3, 2) block row-major, so this is its exact inverse.
+        columns = features[:, :, :6].reshape(-1, 3, 2)
+
+        a, b = columns[:, :, 0], columns[:, :, 1]
+        x = a / np.linalg.norm(a, axis=-1, keepdims=True)
+        b = b - (x * b).sum(-1, keepdims=True) * x
+        y = b / np.linalg.norm(b, axis=-1, keepdims=True)
+        matrix = np.stack([x, y, np.cross(x, y)], axis=-1)
+
+        return Rotation.from_matrix(matrix).as_rotvec().reshape(frames, joints, 3)
+
+
+# Which layout a config file describes is the config's business, not the caller's: the
+# datamodule is handed one path and must not know which experiment arm it is running.
+def build_representation(path: str | Path) -> Representation:
+    """Build the representation the definition at ``path`` describes."""
+
+    human = _load_human_definition(path)
+    return (SmplRepresentation if human.get("kind") == "smpl" else Representation).from_human(human)

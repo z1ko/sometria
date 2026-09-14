@@ -23,6 +23,8 @@ import re
 import polars as pl
 
 from sometria.catalog import (
+    _key,
+    sample_key,
     ANNOTATIONS,
     SPLITS,
     VOCABULARY,
@@ -32,25 +34,7 @@ from sometria.catalog import (
 
 # BABEL identifies a sequence by `feat_p`, e.g. `MPIHDM05/MPI_HDM05/dg/HDM_dg_03-11_03_120_poses.npz`.
 # Our sample paths look like `HDM05/dg/HDM_dg_03-11_03_120_stageii.csv`. So: drop BABEL's duplicated
-# second component, rename the dataset folder, drop the `_poses` / `_stageii` suffix, and normalize
-# case and separators (AMASS mirrors differ on spaces/underscores/dashes).
-
-# BABEL dataset folder -> folder name used in our preprocessed tree
-DATASET_ALIASES = {
-    "MPIHDM05": "HDM05",
-    "DFaust67": "DFaust",
-    "Transitionsmocap": "Transitions",
-    "MPImosh": "MoSh",
-    "TCDhandMocap": "TCDHands",
-    "MPILimits": "PosePrior",
-    "SSMsynced": "SSM",
-    "EyesJapanDataset": "Eyes_Japan_Dataset",
-}
-
-
-def _key(dataset: str, rest: str) -> str:
-    rest = re.sub(r"_(poses|stageii)$", "", rest, flags=re.IGNORECASE)
-    return f"{DATASET_ALIASES.get(dataset, dataset)}/{re.sub(r'[^a-z0-9/]', '', rest.lower())}"
+# second component, then hand the rest to the shared normalizer in `sometria.catalog`.
 
 
 def babel_key(feat_p: str) -> str:
@@ -58,13 +42,6 @@ def babel_key(feat_p: str) -> str:
 
     parts = Path(feat_p).with_suffix("").parts  # <dataset>/<dataset>/<subject>/<seq>
     return _key(parts[0], "/".join(parts[2:]))
-
-
-def sample_key(path: str) -> str:
-    """Normalize one of our catalog ``source_path`` values into the shared join key."""
-
-    parts = Path(path).with_suffix("").parts  # <dataset>/<subject>/<seq>
-    return _key(parts[0], "/".join(parts[1:]))
 
 
 def _catalog_keys(output_root: str | Path, *columns: str) -> pl.DataFrame:

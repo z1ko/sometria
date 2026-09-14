@@ -7,7 +7,7 @@ import polars as pl
 from pathlib import Path
 
 from sometria.catalog import MotionViewSpec, build_motion_view
-from sometria.representation import Representation
+from sometria.representation import Representation, build_representation
 
 
 class WindowCollate:
@@ -144,13 +144,16 @@ class MotionDataModule(L.LightningDataModule):
         human = config.dataloader.get("human")
         if human is None:
             raise ValueError("config.dataloader.human is required.")
-        self.representation = Representation.from_config(human)
+        self.representation = build_representation(human)
 
         # Short samples are dropped, not zero-padded: padding scores as motionless, so
         # motion-aware masking keeps it and spends the context budget on frames that are
         # not there. The spec is where that decision is enforced, and it has to reach both
         # splits -- WindowCollate raises on anything shorter that reaches it.
+        # The representation is not a filter the config sets: it is whichever layout the
+        # `human` definition just built, and a view holding any other one cannot be stacked.
         self.train_spec = MotionViewSpec(
+            representation=self.representation.name,
             split_set=config.dataloader.train.split_set,
             split=config.dataloader.train.split,
             source_datasets=tuple(config.dataloader.train.get("source_datasets", [])),
@@ -159,6 +162,7 @@ class MotionDataModule(L.LightningDataModule):
         )
 
         self.val_spec = MotionViewSpec(
+            representation=self.representation.name,
             split_set=config.dataloader.val.split_set,
             split=config.dataloader.val.split,
             source_datasets=tuple(config.dataloader.val.get("source_datasets", [])),

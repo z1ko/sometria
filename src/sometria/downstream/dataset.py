@@ -28,7 +28,7 @@ from sometria.downstream.labels import (
     window_multi_hot,
     window_patch_labels,
 )
-from sometria.representation import Representation
+from sometria.representation import Representation, build_representation
 
 
 def _tiles(n_frames: int, window_frames: int) -> list[int]:
@@ -169,7 +169,7 @@ class LabelledMotionDataModule(L.LightningDataModule):
         human = loader.get("human")
         if human is None:
             raise ValueError("config.dataloader.human is required.")
-        self.representation = Representation.from_config(human)
+        self.representation = build_representation(human)
 
         self.train_spec = self._spec(loader.train)
         self.val_spec = self._spec(loader.val)
@@ -182,6 +182,7 @@ class LabelledMotionDataModule(L.LightningDataModule):
         # because cohorts are not balanced across severity it moves the class
         # distribution -- a filtered CARE-PD run is not scoring CARE-PD's benchmark.
         return MotionViewSpec(
+            representation=self.representation.name,
             split_set=split.split_set,
             split=split.split,
             source_datasets=tuple(split.get("source_datasets", [])),

@@ -23,6 +23,7 @@ call ``build_motion_view``.
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
+import re
 
 import polars as pl
 
@@ -49,6 +50,7 @@ class MotionViewSpec:
     split_set: str | None = None            # "babel_official", "pretrain_v1"
     split: str | None = None                # "train", "val", "test"
     source_datasets: tuple[str, ...] = ()   # ("AMASS", "MotionX")
+    representation: str | None = None       # "opensim_sincos_log_vel_acc_tau_v2"
     label_sources: tuple[str, ...] = ()     # ("BABEL",)
     require_labels: bool = False
     exclude_broken: bool = True
@@ -64,6 +66,42 @@ def stable_sample_id(source_dataset: str, source_path: str) -> str:
     """
 
     return f"{source_dataset}:{source_path}"
+
+
+# One take reaches us through more than one path: the OpenSim conversion writes
+# `DFaust67/50002/...csv`, the AMASS release ships `DFaust/50002/...npz`, and BABEL names the
+# same sequence `DFaust67/DFaust_67/50002/..._poses.npz`. `sample_key` is the one place that
+# reconciles them -- it names a *take*, independent of which corpus or format carries it, so
+# labels, splits and the two arms of a feature comparison all join on the same string.
+
+# BABEL dataset folder -> folder name used in our preprocessed tree
+DATASET_ALIASES = {
+    "MPIHDM05": "HDM05",
+    "DFaust67": "DFaust",
+    "Transitionsmocap": "Transitions",
+    "MPImosh": "MoSh",
+    "TCDhandMocap": "TCDHands",
+    "MPILimits": "PosePrior",
+    "SSMsynced": "SSM",
+    "EyesJapanDataset": "Eyes_Japan_Dataset",
+}
+
+
+def _key(dataset: str, rest: str) -> str:
+    rest = re.sub(r"_(poses|stageii)$", "", rest, flags=re.IGNORECASE)
+    return f"{DATASET_ALIASES.get(dataset, dataset)}/{re.sub(r'[^a-z0-9/]', '', rest.lower())}"
+
+
+def sample_key(path: str) -> str:
+    """Normalize one of our catalog ``source_path`` values into the shared join key.
+
+    Lossy on purpose -- case, spaces, dashes and underscores go -- because that is what it
+    takes to reconcile two AMASS mirrors. Two genuinely distinct takes can therefore collapse
+    onto one key; callers that join on it check for duplicates.
+    """
+
+    parts = Path(path).with_suffix("").parts  # <dataset>/<subject>/<seq>
+    return _key(parts[0], "/".join(parts[1:]))
 
 
 def _table_path(root: str | Path, name: str) -> Path:
@@ -226,6 +264,12 @@ def build_motion_view(root: str | Path, spec: MotionViewSpec) -> pl.DataFrame:
     if spec.source_datasets:
         df = df.filter(pl.col("source_dataset").is_in(spec.source_datasets))
 
+    # Samples under different representations have different feature shapes, and a view is
+    # consumed as one stacked tensor. Mixing them fails deep inside normalization or the
+    # collate; naming the representation fails here, by name.
+    if spec.representation is not None:
+        df = df.filter(pl.col("representation") == spec.representation)
+
     # Get all samples relative to a split set and a particular split
     if spec.split_set is not None:
         split_df = splits.filter(pl.col("split_set") == spec.split_set)
@@ -254,6 +298,79 @@ def build_motion_view(root: str | Path, spec: MotionViewSpec) -> pl.DataFrame:
     # same index, and the index points at a different motion. Measured on the BABEL train
     # view, row 0 differed between consecutive calls.
     return df.sort("sample_id")
+
+
+def create_paired_split(
+    *,
+    output_root: str | Path,
+    split_set: str,
+    source_split_set: str,
+    arms: tuple[str, ...],
+    splits: tuple[str, ...] = (),
+    exclude_broken: bool = True,
+    min_frames: int | None = None,
+) -> pl.DataFrame:
+    """Copy a split onto several corpora, keeping only takes every one of them has.
+
+    Two imports of the same corpus are never quite the same set: the OpenSim conversion
+    kept 1 of LARa's 452 takes and 63 of DanceDB's 151, a handful of AMASS ``.npz`` are
+    shape fits rather than takes, and the broken-torque filter fires on one arm only
+    because the other has no torque. Training the arms on their own maximal sets then
+    compares corpora as much as it compares features. This intersects them first.
+
+    ``source_split_set`` supplies the membership policy and the train/val/test labels --
+    typically ``pretrain_v1`` or ``babel_official``, which name samples in one arm only;
+    every arm inherits the label of the take. ``exclude_broken`` and ``min_frames`` are
+    applied *here*, not just at view time, because a take dropped from one arm's view for
+    either reason has to leave the other arm too.
+    """
+
+    catalog = load_catalog(output_root).filter(pl.col("source_dataset").is_in(arms))
+
+    if exclude_broken and "broken" in catalog.columns:
+        catalog = catalog.filter(~pl.col("broken"))
+    if min_frames is not None:
+        catalog = catalog.filter(pl.col("n_frames") >= min_frames)
+
+    takes = catalog.select(
+        "sample_id",
+        "source_dataset",
+        pl.col("source_path").map_elements(sample_key, return_dtype=pl.String).alias("take"),
+    )
+
+    paired = (
+        takes.group_by("take")
+        .agg(pl.col("source_dataset").n_unique().alias("n_arms"))
+        .filter(pl.col("n_arms") == len(arms))
+        .select("take")
+    )
+
+    source = load_splits(output_root).filter(pl.col("split_set") == source_split_set)
+    if splits:
+        source = source.filter(pl.col("split").is_in(splits))
+
+    # One split label per take, not per sample: the source split names one arm's ids, and a
+    # lossy key can collapse two of them, so sort first and the pick stops being arbitrary.
+    labels = (
+        source.join(takes.select("sample_id", "take"), on="sample_id", how="inner")
+        .sort("sample_id")
+        .unique(subset=["take"], keep="first")
+        .select("take", "split")
+    )
+
+    rows = (
+        takes.join(paired, on="take", how="semi")
+        .join(labels, on="take", how="inner")
+        .select(
+            "sample_id",
+            pl.lit(split_set).alias("split_set"),
+            "split",
+            pl.lit(None).cast(pl.String).alias("label_source"),
+            pl.lit(None).cast(pl.Int64).alias("babel_sid"),
+        )
+    )
+
+    return upsert_table(output_root, SPLITS, rows, keys=["sample_id", "split_set"])
 
 
 def create_pretrain_split(

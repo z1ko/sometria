@@ -1,0 +1,33 @@
+# SMPL/SMPL-X body joints, in AMASS `poses` order. Only the first 22 are read: the
+# remaining joints of an SMPL-X file (hands, jaw, eyes) have no OpenSim counterpart in
+# config/human.yaml, and AMASS hand poses are mostly a fitted constant.
+kind: smpl
+
+joints:
+  - pelvis           #00
+  - left_hip         #01
+  - right_hip        #02
+  - spine1           #03
+  - left_knee        #04
+  - right_knee       #05
+  - spine2           #06
+  - left_ankle       #07
+  - right_ankle      #08
+  - spine3           #09
+  - left_foot        #10
+  - right_foot       #11
+  - neck             #12
+  - left_collar      #13
+  - right_collar     #14
+  - head             #15
+  - left_shoulder    #16
+  - right_shoulder   #17
+  - left_elbow       #18
+  - right_elbow      #19
+  - left_wrist       #20
+  - right_wrist      #21
+
+# The pelvis rotation is the global orientation of the take, the same shortcut the
+# OpenSim import excludes as `pelvis_*`.
+excluded_joints:
+  - pelvis

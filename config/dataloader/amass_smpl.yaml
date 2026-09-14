@@ -1,0 +1,32 @@
+# The SMPL arm of the corpus ablation: the takes amass_paired.yaml trains on, read from the
+# raw .npz instead of the OpenSim CSV. Both arms run the same split sets, which hold only
+# the takes both imports produced -- see scripts/import_amass_smpl.py. Model dimensions live here rather than in the
+# base config because they are a property of the corpus, not of the architecture: 21 body
+# joints instead of 43 anatomical DOFs, 18 channels instead of 5.
+#
+# scripts/pretrain_matrix.sh cannot drive this arm -- its nine cells override
+# channels_input/channels_output with indices into the 5-channel OpenSim layout. Run
+# train.py directly, or pass cell channel lists of your own.
+dataloader:
+  root: data/processed
+  normalization: stats/smpl_rot6d_log_vel_acc_v1/pretrain_paired_v1_train_clean.pt
+  human: config/smpl.yaml
+
+  num_workers: 4
+  window_frames: 240
+  batch_size: 200
+
+  train:
+    source_datasets: ["AMASS-SMPL"]
+    split_set: pretrain_paired_v1
+    split: train
+
+  val:
+    source_datasets: ["AMASS-SMPL"]
+    split_set: babel_paired
+    split: val
+
+model:
+  num_dofs: 21
+  channels_input:  [0, 1, 2, 3, 4, 5] # Only pose input
+  channels_output: [0, 1, 2, 3, 4, 5] # Only pose output
