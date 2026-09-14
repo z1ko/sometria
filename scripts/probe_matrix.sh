@@ -7,8 +7,13 @@
 #
 # Same four knobs as the pretraining sweep, so the same command line names the same runs:
 #
-#   runs/pretrain/<corpus>/<arch>_<epochs>ep/<cell>          read
-#   runs/probe/<benchmark>/<corpus>/<arch>_<epochs>ep/<cell> written
+#   runs/pretrain/<corpus>/<arch>_<epochs>ep<objective>/<cell>          read
+#   runs/probe/<benchmark>/<corpus>/<arch>_<epochs>ep<objective>/<cell> written
+#
+# OBJECTIVE mirrors the slot pretrain_matrix.sh writes, and carries the same asymmetry:
+# empty for MAE so every probe already on disk keeps its path, `_jepa` and so on otherwise.
+# A cell is `in_<x>__loss_<y>` where the objective has a loss axis and plain `in_<x>` where
+# it does not, so the glob below matches on the part they share.
 #
 # The normalization statistics are taken from the *corpus* config, not from the probe
 # config, and this is the whole reason the corpus is a knob here rather than just a path
@@ -42,6 +47,15 @@ EPOCHS=${EPOCHS:-100}
 CONFIG=${CONFIG:-config/experiment_linear_probe.yaml}
 DATALOADER=${DATALOADER:-config/dataloader/${CORPUS}.yaml}
 
+# Which pretraining objective's tree to read. Named rather than sniffed, because unlike
+# pretrain_matrix.sh there is no base config here to read `model.name` off -- this script
+# only ever sees the probe config and the corpus.
+#
+#   OBJECTIVE=jepa ./scripts/probe_matrix.sh
+OBJECTIVE=${OBJECTIVE:-mae}
+SUFFIX=""
+[ "$OBJECTIVE" != "mae" ] && SUFFIX="_$OBJECTIVE"
+
 # Two independent replicate axes, because they measure different things.
 #
 # SEED selects which *pretraining* replicate to read, and mirrors into the output path so
@@ -66,10 +80,10 @@ if [ -z "$REPEATS" ]; then repeats=(""); else read -ra repeats <<< "$REPEATS"; f
 
 # Base paths; seed and repeat segments are appended per combination below.
 SPLIT_SET=${SPLIT_SET:-}
-PRETRAIN=${PRETRAIN:-runs/pretrain/${CORPUS}/${ARCH}_${EPOCHS}ep}
+PRETRAIN=${PRETRAIN:-runs/pretrain/${CORPUS}/${ARCH}_${EPOCHS}ep${SUFFIX}}
 # The split set joins the path rather than only the config, so two protocols scored from
 # the same checkpoint do not overwrite each other's metrics.json.
-OUT=${OUT:-runs/probe/${BENCHMARK}${SPLIT_SET:+/$SPLIT_SET}/${CORPUS}/${ARCH}_${EPOCHS}ep}
+OUT=${OUT:-runs/probe/${BENCHMARK}${SPLIT_SET:+/$SPLIT_SET}/${CORPUS}/${ARCH}_${EPOCHS}ep${SUFFIX}}
 DRY=${DRY:-}
 
 for config in "$CONFIG" "$DATALOADER"; do
@@ -105,6 +119,7 @@ echo "benchmark  $BENCHMARK  ($CONFIG)"
 echo "corpus     $CORPUS  ($DATALOADER)"
 echo "normalize  $NORMALIZATION"
 echo "arch       $ARCH"
+echo "objective  $OBJECTIVE"
 echo "epochs     $EPOCHS"
 echo "seeds      ${SEEDS:-<canonical pretraining run>}"
 echo "repeats    ${REPEATS:-<none, probe seed from config>}"
@@ -125,7 +140,9 @@ for seed in "${seeds[@]}"; do
         out_root="$OUT${seed:+/seed$seed}${repeat:+/rep$repeat}"
         [ -n "$seed$repeat" ] && echo "== ${seed:+seed $seed }${repeat:+repeat $repeat }-> $out_root"
 
-        for dir in "$source_root"/in_*__loss_*; do
+        # `in_*`, not `in_*__loss_*`: it matches both naming schemes, since a cell without
+        # a loss axis is named for its input channels alone.
+        for dir in "$source_root"/in_*; do
             [ -d "$dir" ] || continue
             found=$((found + 1))
             name=$(basename "$dir")
@@ -148,4 +165,4 @@ for seed in "${seeds[@]}"; do
     done
 done
 
-[ "$found" -gt 0 ] || { echo "no in_*__loss_* cells under $PRETRAIN" >&2; exit 1; }
+[ "$found" -gt 0 ] || { echo "no in_* cells under $PRETRAIN" >&2; exit 1; }
