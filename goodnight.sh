@@ -40,18 +40,57 @@ stage() { echo; echo "=== $* :: $(date '+%F %T')"; }
 stage "start"
 echo "log: $LOG"
 
-CORPUS=${CORPUS:-amass_motionx_clean}
-SEEDS=${SEEDS:-1 2}
 
-stage "pretrain $CORPUS medium_100ep seeds $SEEDS"
-CORPUS=$CORPUS ARCH=medium EPOCHS=100 SEEDS="$SEEDS" ./scripts/pretrain_matrix.sh
+# The SMPL arm is not a matrix and the sweep scripts refuse it. Its features are 18
+# channels of rot6d with no torque, so the p/pk/pkd ladder -- indices into the 5-channel
+# OpenSim stack -- does not describe it. There is one configuration, pose in and pose out,
+# replicated over seeds, which is exactly how the MAE arm at
+# runs/pretrain/amass_smpl/medium_100ep/ was run. These stages mirror it.
+#
+# The cell name in the *probe* path is a label, not a swept axis: gen.py collects cells by
+# name, so `in_p` for an objective with no loss axis and `in_p__loss_p` for one with it
+# files these rows beside the MAE arm's.
+SMPL_STACK=(config/dataloader/amass_smpl.yaml)
+SMPL_NORM=stats/smpl_rot6d_log_vel_acc_v1/pretrain_paired_v1_train_clean.pt
+SMPL_SEED=${SMPL_SEED:-42}
+
+smpl_run() {   # objective  size-config  probe-cell-name
+    local objective=$1 size=$2 cell=$3
+    local out="runs/pretrain/amass_smpl/medium_100ep_${objective}/seed${SMPL_SEED}"
+    local probe="runs/probe/babel_60_convex/amass_smpl/medium_100ep_${objective}/seed${SMPL_SEED}/${cell}"
+
+    stage "pretrain amass_smpl medium_100ep_${objective} seed ${SMPL_SEED}"
+    if [ -e "$out/done" ]; then
+        echo "skip   $out"
+    else
+        uv run python train.py \
+            --config "config/pretrain_${objective}.yaml" "${SMPL_STACK[@]}" "$size" \
+            --output "$out" \
+            "training.epochs=100" "training.seed=${SMPL_SEED}"
+    fi
+
+    stage "probe amass_smpl medium_100ep_${objective} seed ${SMPL_SEED}"
+    if [ -e "$probe/metrics.json" ]; then
+        echo "skip   $probe"
+    else
+        uv run python scripts/probe_convex_mae.py \
+            --checkpoint "$out" \
+            --config config/experiment_linear_probe_smpl.yaml \
+            --output "$probe" \
+            "dataloader.normalization=${SMPL_NORM}"
+    fi
+}
+
+smpl_run jepa   config/jepa/medium.yaml   in_p
+smpl_run simmim config/simmim/medium.yaml in_p__loss_p
 
 # 42 first so an existing result is confirmed rather than assumed; it skips in seconds.
-stage "probe $CORPUS medium_100ep seeds 42 $SEEDS"
-CORPUS=$CORPUS ARCH=medium EPOCHS=100 SEEDS="42 $SEEDS" ./scripts/probe_matrix.sh
-
-stage "summarize"
-uv run python results/probe/babel_60_convex/gen.py
-
-stage "done"
-echo "read: results/probe/babel_60_convex/README.md  (Replicate spread section)"
+# stage "probe amass_clean medium_100ep seeds 1 2"
+# OBJECTIVE=jepa CORPUS=amass_clean ARCH=medium EPOCHS=100 \
+#   SEEDS="1 2" ./scripts/probe_matrix.sh
+# 
+# stage "summarize"
+# uv run python results/probe/babel_60_convex/gen.py
+# 
+# stage "done"
+# echo "read: results/probe/babel_60_convex/README.md  (Replicate spread section)"

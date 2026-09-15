@@ -1,5 +1,6 @@
 from pathlib import Path
 import argparse
+import inspect
 
 import lightning as L
 import torch
@@ -18,12 +19,43 @@ from sometria.models.simmim import SimMIM
 MODELS: dict[str, type[L.LightningModule]] = {"mae": MAE, "jepa": JEPA, "simmim": SimMIM}
 
 
+def model_kwargs(name: str, model_config: dict) -> dict:
+    """The subset of a merged `model:` block that `name`'s constructor actually takes.
+
+    Some `model:` keys describe the *corpus*, not the objective, and a corpus config
+    carries them because most objectives want them: config/dataloader/amass_smpl.yaml
+    sets `channels_output`, which JEPA does not have because it reconstructs nothing.
+    Composing the two is legitimate and used to die with a TypeError naming an argument
+    nobody wrote by hand.
+
+    A key is dropped only when some *other* registered objective accepts it. That is what
+    keeps a typo an error: `channles_input` belongs to nothing and still fails loudly,
+    where a blanket filter would swallow it and train the wrong model in silence. The drop
+    is printed, because a config line that stopped applying should say so.
+    """
+
+    accepted = set(inspect.signature(MODELS[name]).parameters)
+    known = {p for model in MODELS.values() for p in inspect.signature(model).parameters}
+    unknown = sorted(set(model_config) - known)
+    if unknown:
+        raise SystemExit(f"unknown model keys {unknown}; no objective accepts them")
+
+    kept = {}
+    for key, value in model_config.items():
+        if key in accepted:
+            kept[key] = value
+        else:
+            print(f"{name}: ignoring model.{key}, which belongs to another objective")
+    return kept
+
+
 def build(config: DictConfig) -> tuple[L.LightningModule, L.LightningDataModule]:
     model_config = OmegaConf.to_container(config.model, resolve=True)
     name = model_config.pop("name", "mae")  # type: ignore[union-attr]
     if name not in MODELS:
         raise SystemExit(f"unknown model.name {name!r}; expected one of {sorted(MODELS)}")
-    return MODELS[name](**model_config), MotionDataModule(config)  # type: ignore[arg-type]
+    kwargs = model_kwargs(name, model_config)  # type: ignore[arg-type]
+    return MODELS[name](**kwargs), MotionDataModule(config)
 
 
 def train(config: DictConfig, output: Path):

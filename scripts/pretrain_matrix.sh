@@ -121,6 +121,19 @@ done
 names=(p pk pkd)
 channels=("[0,1]" "[0,1,2,3]" "[0,1,2,3,4]")
 
+# Those indices are positions in the 5-channel OpenSim stack (sin, cos, vel, acc, tau). A
+# corpus that declares its own channels has a different layout and they do not transfer:
+# config/dataloader/amass_smpl.yaml is 18 channels of rot6d with no torque, so `[0,1]`
+# there is two of six rotation components rather than "position", and the ladder has two
+# rungs rather than three. Refuse, rather than sweep nine meaningless cells that would look
+# exactly like real ones on disk.
+if grep -qE '^[[:space:]]*channels_input[[:space:]]*:' "$DATALOADER"; then
+    echo "$DATALOADER declares its own channels_input, so this corpus has a feature layout" >&2
+    echo "the p/pk/pkd ladder does not describe. Run train.py directly for this arm --" >&2
+    echo "see the amass_smpl stages in goodnight.sh for the pattern." >&2
+    exit 1
+fi
+
 # Whether this objective has a loss axis at all. MAE reconstructs channels, so input x loss
 # is a real 3x3. JEPA's target is an embedding and its constructor takes no
 # `channels_output`, so the same sweep is three cells -- and passing the override anyway is
