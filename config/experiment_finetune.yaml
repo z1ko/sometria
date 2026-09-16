@@ -7,7 +7,10 @@
 dataloader:
   root: data/processed
   human: config/human.yaml
-  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_train_clean.pt
+  # Overridden per corpus by scripts/finetune_matrix.sh, which reads it out of the corpus
+  # config. A backbone fed windows normalized by other statistics than it pretrained under
+  # is offset silently and without error, so this default is only right for amass_clean.
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_stats_train_clean.pt
   batch_size: 128
   num_workers: 4
   window_frames: 240
@@ -38,20 +41,32 @@ encoder:
   mlp_ratio: 4.0
   dropout: 0.0
 
+# Defaults follow MAE's end-to-end finetune recipe (arXiv:2111.06377, Table 9): AdamW at
+# base lr 1e-3 with layer-wise decay 0.75, weight decay 0.05, 5% warmup, cosine to zero.
+# The head has no rate of its own there and none here -- it sits at the top of the ladder
+# where the depth scale is 1, so `lr` is its rate and every block below it is scaled down.
 model:
   name: finetune
-  checkpoint: runs/mamp/lightning_logs/version_0/checkpoints/last.ckpt
-  encoder: teacher       # which submodule of the checkpoint holds the weights
-  pool: attentive        # "mean" | "mean_max" | "attentive" | "attentive_factorized"
-  lr: 0.005              # the fresh head and pooler
-  backbone_lr: 0.00001   # the backbone is already near where it should be
-  weight_decay: 0.01     # 2-D parameters only, see downstream/finetune.py
-  min_lr_frac: 0.01      # decay to nothing, unlike a probe -- this one is the final model
+  # Ignored by scripts/finetune_baseline_mae.py, which takes --checkpoint. Only sometria.train
+  # reads it, and that path cannot load the pretraining matrix's checkpoints at all -- see
+  # the script's docstring for why.
+  checkpoint: null
+  encoder: teacher       # sometria.train only: which submodule of the checkpoint holds the weights
+  pool: attentive        # "mean" | "mean_max" | "moments" | "attentive" | "attentive_factorized"
+  lr: 0.001              # base rate: the head and pooler outright, the blocks after decay
+  layer_decay: 0.75      # block k runs at lr * 0.75 ** (depth - k); null falls back to backbone_lr
+  backbone_lr: 0.00001   # only read when layer_decay is null. One flat rate low enough for the
+                         # bottom block is far too low for the top, which is why layer_decay exists.
+  weight_decay: 0.05     # 2-D parameters only, positional tables excluded by name
+  min_lr_frac: 0.0       # cosine to zero, unlike a probe -- this one is the final model
   warmup: 0.05
 
 training:
   seed: 13
-  epochs: 50
+  # 100, as MAE uses for ViT-B. At 50 both the MAE and JEPA curves were still climbing and
+  # flattened only because the schedule had decayed, so the old default reported an underfit
+  # model as though it were a converged one.
+  epochs: 100
   monitor: val/macro_map
   limit_train_batches: 1.0
   limit_val_batches: 1.0

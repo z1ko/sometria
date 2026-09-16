@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
-# Probe every cell of one pretraining matrix, mirroring scripts/pretrain_matrix.sh.
+# Fine-tune every cell of one pretraining matrix. Same knobs as scripts/probe_matrix.sh,
+# which this mirrors line for line -- what differs is the script it calls, where the results
+# land, and CELLS, because a fine-tune answers a different question at a very different price.
 #
-#   ./scripts/probe_matrix.sh
-#   CORPUS=amass_motionx_complete ./scripts/probe_matrix.sh
-#   CORPUS=amass_clean ARCH=small EPOCHS=40 DRY=1 ./scripts/probe_matrix.sh
+#   ./scripts/finetune_matrix.sh
+#   OBJECTIVE=simmim SEEDS="42 1 2" ./scripts/finetune_matrix.sh
+#   CELLS="in_pk__loss_pk" SEEDS="42 1 2" DRY=1 ./scripts/finetune_matrix.sh
+#
+# Read the cost before launching. A convex probe extracts features once and fits a head;
+# this trains the whole backbone for `training.epochs`. The full grid is 9 cells x 3 seeds x
+# 4 objectives = 108 runs. CELLS is why it exists here and not in probe_matrix.sh: one
+# pre-specified cell across the four objectives at three seeds is 12 runs, and that is the
+# ranking question the frozen probe could not answer.
 #
 # Same four knobs as the pretraining sweep, so the same command line names the same runs:
 #
 #   runs/pretrain/<corpus>/<arch>_<epochs>ep<objective>/<cell>          read
-#   runs/probe/<benchmark>/<corpus>/<arch>_<epochs>ep<objective>/<cell> written
+#   runs/finetune/<benchmark>/<corpus>/<arch>_<epochs>ep<objective>/<cell> written
 #
 # OBJECTIVE mirrors the slot pretrain_matrix.sh writes, and carries the same asymmetry:
-# empty for MAE so every probe already on disk keeps its path, `_jepa` and so on otherwise.
+# empty for MAE so the paths match the probe tree cell for cell, `_jepa` and so on otherwise.
 # A cell is `in_<x>__loss_<y>` where the objective has a loss axis and plain `in_<x>` where
 # it does not, so the glob below matches on the part they share.
 #
@@ -19,39 +27,39 @@
 # config, and this is the whole reason the corpus is a knob here rather than just a path
 # segment. The backbone is frozen: feed it windows normalized by statistics other than the
 # ones it pretrained under and every feature is offset, silently and without error.
-# config/experiment_linear_probe.yaml pins pretrain_v1 statistics, which are wrong for any
+# config/experiment_finetune.yaml pins pretrain_v1 statistics, which are wrong for any
 # checkpoint pretrained on anything else.
 #
-# BENCHMARK names the output directory only. A second benchmark needs its own probe config
+# BENCHMARK names the output directory only. A second benchmark needs its own finetune config
 # (different label_set and splits), so pass both:
 #
-#   BENCHMARK=carepd_updrs_convex CONFIG=config/experiment_probe_carepd.yaml ...
+#   BENCHMARK=carepd_updrs_finetune CONFIG=config/experiment_probe_carepd.yaml ...
 #
 # SPLIT_SET overrides both sides of the config's split and adds itself to the output path.
 # For CARE-PD the split set *is* the evaluation protocol -- within-site, cross-site, LODO
 # and MIDA differ in nothing else -- so this is how a protocol gets run:
 #
-#   SPLIT_SET=carepd_lodo_BMCLab BENCHMARK=carepd_updrs_convex \
-#     CONFIG=config/experiment_probe_carepd.yaml ./scripts/probe_matrix.sh
+#   SPLIT_SET=carepd_lodo_BMCLab BENCHMARK=carepd_updrs_finetune \
+#     CONFIG=config/experiment_probe_carepd.yaml ./scripts/finetune_matrix.sh
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 PYTHON=(${PYTHON:-uv run python})
 
-BENCHMARK=${BENCHMARK:-babel_60_convex}
+BENCHMARK=${BENCHMARK:-babel_60_finetune}
 CORPUS=${CORPUS:-amass_clean}
 ARCH=${ARCH:-medium}
 EPOCHS=${EPOCHS:-100}
 
-CONFIG=${CONFIG:-config/experiment_linear_probe.yaml}
+CONFIG=${CONFIG:-config/experiment_finetune.yaml}
 DATALOADER=${DATALOADER:-config/dataloader/${CORPUS}.yaml}
 
 # Which pretraining objective's tree to read. Named rather than sniffed, because unlike
 # pretrain_matrix.sh there is no base config here to read `model.name` off -- this script
 # only ever sees the probe config and the corpus.
 #
-#   OBJECTIVE=jepa ./scripts/probe_matrix.sh
+#   OBJECTIVE=jepa ./scripts/finetune_matrix.sh
 OBJECTIVE=${OBJECTIVE:-mae}
 SUFFIX=""
 [ "$OBJECTIVE" != "mae" ] && SUFFIX="_$OBJECTIVE"
@@ -66,13 +74,13 @@ SUFFIX=""
 # slightly different head. Repeats bound that, and it is the smaller of the two -- the
 # pretraining seed is not controlled at all unless SEED is used.
 #
-#   SEED=7 ./scripts/probe_matrix.sh                 reads/writes .../seed7/<cell>
-#   REPEAT=2 ./scripts/probe_matrix.sh               writes .../rep2/<cell>
+#   SEED=7 ./scripts/finetune_matrix.sh              reads/writes .../seed7/<cell>
+#   REPEAT=2 ./scripts/finetune_matrix.sh            writes .../rep2/<cell>
 # Both are space-separated lists, same shape as SEEDS in pretrain_matrix.sh, and they
 # nest: every REPEAT is run against every SEED.
 #
-#   SEEDS="1 2 3" ./scripts/probe_matrix.sh        probe three pretraining replicates
-#   REPEATS="1 2 3" ./scripts/probe_matrix.sh      re-probe the canonical run three times
+#   SEEDS="1 2 3" ./scripts/finetune_matrix.sh     fine-tune three pretraining replicates
+#   REPEATS="1 2 3" ./scripts/finetune_matrix.sh   re-run the canonical backbone three times
 SEEDS=${SEEDS:-}
 REPEATS=${REPEATS:-}
 if [ -z "$SEEDS" ]; then seeds=(""); else read -ra seeds <<< "$SEEDS"; fi
@@ -80,10 +88,23 @@ if [ -z "$REPEATS" ]; then repeats=(""); else read -ra repeats <<< "$REPEATS"; f
 
 # Base paths; seed and repeat segments are appended per combination below.
 SPLIT_SET=${SPLIT_SET:-}
+# Which cells to run, as a glob against the pretraining tree. `in_*` is everything and
+# matches both naming schemes, since an objective with no loss axis names its cells for
+# their input channels alone. Narrow it rather than the seed list when scoping: seeds are
+# the replicate axis every claim here is measured against.
+CELLS=${CELLS:-in_*}
+# Extra OmegaConf dotlist overrides, appended verbatim to every call. A sweep over one
+# config knob is otherwise a copy of this whole script with one line changed.
+#
+#   EXTRA="model.dropout=0.1 model.layer_decay=0.5" ./scripts/finetune_matrix.sh
+#
+# Deliberately not validated here: OmegaConf already rejects a key the config has no slot
+# for, and re-listing the valid ones would be a second place to forget a new knob.
+EXTRA=${EXTRA:-}
 PRETRAIN=${PRETRAIN:-runs/pretrain/${CORPUS}/${ARCH}_${EPOCHS}ep${SUFFIX}}
 # The split set joins the path rather than only the config, so two protocols scored from
 # the same checkpoint do not overwrite each other's metrics.json.
-OUT=${OUT:-runs/probe/${BENCHMARK}${SPLIT_SET:+/$SPLIT_SET}/${CORPUS}/${ARCH}_${EPOCHS}ep${SUFFIX}}
+OUT=${OUT:-runs/finetune/${BENCHMARK}${SPLIT_SET:+/$SPLIT_SET}/${CORPUS}/${ARCH}_${EPOCHS}ep${SUFFIX}}
 DRY=${DRY:-}
 
 for config in "$CONFIG" "$DATALOADER"; do
@@ -122,8 +143,9 @@ echo "arch       $ARCH"
 echo "objective  $OBJECTIVE"
 echo "epochs     $EPOCHS"
 echo "seeds      ${SEEDS:-<canonical pretraining run>}"
-echo "repeats    ${REPEATS:-<none, probe seed from config>}"
+echo "repeats    ${REPEATS:-<none, run seed from config>}"
 echo "split set  ${SPLIT_SET:-<from $CONFIG>}"
+echo "overrides  ${EXTRA:-<none>}"
 echo "read       $PRETRAIN"
 echo "write      $OUT"
 echo
@@ -140,29 +162,28 @@ for seed in "${seeds[@]}"; do
         out_root="$OUT${seed:+/seed$seed}${repeat:+/rep$repeat}"
         [ -n "$seed$repeat" ] && echo "== ${seed:+seed $seed }${repeat:+repeat $repeat }-> $out_root"
 
-        # `in_*`, not `in_*__loss_*`: it matches both naming schemes, since a cell without
-        # a loss axis is named for its input channels alone.
-        for dir in "$source_root"/in_*; do
+        for dir in $(compgen -G "$source_root/$CELLS" || true); do
             [ -d "$dir" ] || continue
             found=$((found + 1))
             name=$(basename "$dir")
             out="$out_root/$name"
             done_already "$out" && continue
 
-            echo "probe  $name"
-            # A repeat index doubles as the probe seed. probe_convex_mae.py seeds from
-            # training.seed, so without this every repeat would refit identical crops and
-            # measure nothing at all.
-            run "${PYTHON[@]}" scripts/probe_convex_mae.py \
+            echo "finetune  $name"
+            # A repeat index doubles as the run seed. finetune_baseline_mae.py seeds from
+            # training.seed, so without this every repeat would draw identical crops and an
+            # identical head initialization, and measure nothing at all.
+            run "${PYTHON[@]}" scripts/finetune_baseline_mae.py \
                 --checkpoint "$dir" \
                 --config "$CONFIG" \
                 --output "$out" \
                 "dataloader.normalization=$NORMALIZATION" \
                 ${SPLIT_SET:+"dataloader.train.split_set=$SPLIT_SET"} \
                 ${SPLIT_SET:+"dataloader.val.split_set=$SPLIT_SET"} \
-                ${repeat:+"training.seed=$repeat"}
+                ${repeat:+"training.seed=$repeat"} \
+                $EXTRA
         done
     done
 done
 
-[ "$found" -gt 0 ] || { echo "no in_* cells under $PRETRAIN" >&2; exit 1; }
+[ "$found" -gt 0 ] || { echo "no cell matching $CELLS under $PRETRAIN" >&2; exit 1; }

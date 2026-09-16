@@ -16,7 +16,7 @@ from sometria.architecture.encoder import EncoderSpec, MotionTransformerEncoder,
 from sometria.architecture.scheduler import lr_schedule
 from sometria.downstream.dataset import LabelledWindows, _tiles
 from sometria.downstream.classifier import MotionLinearClassifier
-from sometria.downstream.finetune import MotionFinetuneClassifier
+from sometria.downstream.finetune import MotionFinetuneClassifier, depth_of
 from sometria.downstream.labels import window_multi_hot
 from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAveragePrecision
 from sometria.models.mamp import MaskedMotionPredictor
@@ -292,6 +292,82 @@ def test_a_finetune_runs_the_backbone_slower_than_the_head():
     assert {id(p) for p in model.parameters()} == set(rates)
     assert all(rates[i] == 1e-5 for i in backbone_ids)
     assert all(rates[id(p)] == 1e-3 for p in model.head.parameters())
+
+
+LADDER = EncoderSpec(d_model=16, depth=3, num_heads=2)
+
+
+def _rates(model):
+    model._trainer = SimpleNamespace(estimated_stepping_batches=10)
+    optimizer = model.configure_optimizers()["optimizer"]
+    # initial_lr, not lr: the schedule has already applied its warmup factor
+    return {id(p): g["initial_lr"] for g in optimizer.param_groups for p in g["params"]}
+
+
+def test_layer_wise_decay_puts_a_rung_between_every_block():
+    """MAE's scheme exactly: the head at the base rate, each block below it scaled once more.
+
+    Written against named parameters rather than group order, because the ordering of
+    `param_groups` is an implementation detail and the mapping from a block to its rate is not.
+    """
+
+    model = MotionFinetuneClassifier(
+        MotionTransformerEncoder(LADDER), num_labels=LABELS, pool="mean",
+        lr=1e-3, layer_decay=0.75,
+    )
+    rates = _rates(model)
+    by_name = {name: rates[id(p)] for name, p in model.backbone.named_parameters()}
+
+    # 3 blocks -> num_layers 4. The tokenizer is rung 0 and the final norm rung 4.
+    assert by_name["projection.weight"] == 1e-3 * 0.75**4
+    assert by_name["position.time_encoding"] == 1e-3 * 0.75**4
+    assert by_name["blocks.layers.0.linear1.weight"] == 1e-3 * 0.75**3
+    assert by_name["blocks.layers.1.linear1.weight"] == 1e-3 * 0.75**2
+    assert by_name["blocks.layers.2.linear1.weight"] == 1e-3 * 0.75
+    assert by_name["blocks.norm.weight"] == 1e-3
+
+    # the head sits at the top of the ladder and takes the base rate outright
+    assert all(rates[id(p)] == 1e-3 for p in model.head.parameters())
+    # and `backbone_lr` is not consulted at all
+    assert 1e-4 not in set(rates.values())
+
+
+def test_the_final_norm_is_read_as_the_top_rung_not_the_bottom():
+    """`blocks.norm` carries no layer index but runs after every block, unlike `projection`."""
+
+    assert depth_of("blocks.layers.0.linear1.weight", 4) == 1
+    assert depth_of("blocks.norm.weight", 4) == 4
+    assert depth_of("projection.weight", 4) == 0
+    # the adapter the finetune script wraps a checkpoint in prefixes every name
+    assert depth_of("mae.encoder.blocks.layers.2.norm1.weight", 4) == 3
+
+
+def test_layer_decay_left_unset_keeps_the_flat_backbone_rate():
+    """The old scheme has runs on disk, so omitting the knob has to reproduce it exactly."""
+
+    model = MotionFinetuneClassifier(
+        MotionTransformerEncoder(LADDER), num_labels=LABELS, pool="mean",
+        lr=1e-3, backbone_lr=1e-5,
+    )
+    rates = _rates(model)
+    assert all(rates[id(p)] == 1e-5 for p in model.backbone.parameters())
+
+
+def test_a_positional_table_is_never_decayed():
+    """It is a learned coordinate, not a weight -- and it is 4-D, so the 1-D rule misses it."""
+
+    model = MotionFinetuneClassifier(
+        MotionTransformerEncoder(LADDER), num_labels=LABELS, pool="mean",
+        lr=1e-3, layer_decay=0.75, weight_decay=0.05,
+    )
+    model._trainer = SimpleNamespace(estimated_stepping_batches=10)
+    optimizer = model.configure_optimizers()["optimizer"]
+
+    tables = {id(p) for name, p in model.backbone.named_parameters() if "position." in name}
+    assert tables
+    for group in optimizer.param_groups:
+        if any(id(p) in tables for p in group["params"]):
+            assert group["weight_decay"] == 0.0
 
 
 def test_a_finetune_does_not_decay_norms_and_biases():

@@ -15,10 +15,12 @@ config's ``encoder:`` block: that block is only read when no checkpoint is named
 pretrained backbone always arrives at whatever dropout it was pretrained with. Leave it
 ``None`` until a run actually overfits.
 
-Not here: layer-wise learning-rate decay. It is the next thing to try if a lower
-``backbone_lr`` alone does not stop the early epochs from undoing the pretraining, but it
-is a per-block optimizer group for a gain this codebase has not measured yet.
+``layer_decay`` replaces both knobs with the scheme the literature actually uses, and is
+the recommended setting -- see :func:`layerwise_param_groups`. ``backbone_lr`` stays for the
+runs made before it existed, and is ignored whenever ``layer_decay`` is set.
 """
+
+import re
 
 import lightning as L
 import torch as t
@@ -48,6 +50,86 @@ def param_groups(module: nn.Module, lr: float, weight_decay: float) -> list[dict
     ]
 
 
+#: A transformer block inside ``nn.TransformerEncoder``. Both encoder lineages in this
+#: repo name their stack ``blocks``, so one pattern covers ``sometria.models.baseline.Encoder``
+#: and ``sometria.architecture.encoder.MotionTransformerEncoder`` alike.
+BLOCK = re.compile(r"(?:^|\.)blocks\.layers\.(\d+)\.")
+
+#: Never weight-decayed, whatever their rank. A positional table is a learned coordinate,
+#: not a weight, and decaying it pulls the grid toward a single point. MAE excludes its
+#: ``pos_embed`` by name for the same reason. The 1-D rule `param_groups` uses does not catch
+#: these: ``sometria.models.baseline.Encoder`` stores them as ``(1, 1, V, D)``.
+NO_DECAY = ("pos_s", "pos_t", "position.")
+
+
+def depth_of(name: str, num_layers: int) -> int:
+    """Which rung of the ladder a parameter sits on. 0 is the input, ``num_layers`` the output.
+
+    Three cases, and the middle one is the only one that needs reading twice. A parameter
+    inside block ``i`` is rung ``i + 1``. The stack's *final* norm is named ``blocks.norm``
+    with no layer index, and it runs after every block, so it belongs at the top rather than
+    at the bottom with the tokenizer. Everything else -- the patch projection and the
+    positional tables -- feeds the first block and is rung 0.
+    """
+
+    found = BLOCK.search(name)
+    if found:
+        return int(found.group(1)) + 1
+    return num_layers if "blocks." in name else 0
+
+
+def layerwise_param_groups(
+    module: nn.Module, base_lr: float, weight_decay: float, layer_decay: float
+) -> list[dict]:
+    """Optimizer groups whose learning rate decays with depth, as in BEiT and MAE.
+
+    The rate at rung ``k`` is ``base_lr * layer_decay ** (num_layers - k)``, so the block
+    nearest the head moves at ``base_lr * layer_decay`` and the tokenizer crawls. The
+    reasoning is that a pretrained network is general at the bottom and specific at the top,
+    so a new task should be free to rewrite the top and should barely disturb the bottom --
+    where one flat ``backbone_lr`` has to be low enough for the bottom and is then far too
+    low for the top.
+
+    MAE (arXiv:2111.06377, Table 9) fine-tunes ViT-B at base lr 1e-3 with ``layer_decay``
+    0.75 and no separate head rate at all; the head simply sits at rung ``num_layers``, where
+    the scale is 1. This follows that, which is why ``backbone_lr`` has nothing to do here.
+
+    ``num_layers`` is read off the parameter names rather than off a spec, because this
+    module is handed whatever adapter the caller wrapped its checkpoint in and may never see
+    an ``EncoderSpec``. A backbone with no recognisable blocks lands every parameter on rung
+    0 and is uniformly scaled, which is wrong but is wrong quietly in the safe direction --
+    so it is asserted instead.
+    """
+
+    depths = [int(found.group(1)) for name, _ in module.named_parameters() if (found := BLOCK.search(name))]
+    if not depths:
+        raise ValueError(
+            "no transformer blocks found in the backbone's parameter names, so there is no "
+            "ladder to decay along; pass layer_decay=None to use a flat backbone_lr instead"
+        )
+    num_layers = max(depths) + 2
+
+    groups: dict[tuple[int, bool], dict] = {}
+    for name, parameter in module.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        # Biases and norm gains are 1-D and stay undecayed, for the reason `param_groups`
+        # gives: decay on them is not regularization. The positional tables join them by name.
+        decayed = parameter.ndim >= 2 and not any(key in name for key in NO_DECAY)
+        depth = depth_of(name, num_layers)
+        group = groups.setdefault(
+            (depth, decayed),
+            {
+                "params": [],
+                "lr": base_lr * layer_decay ** (num_layers - depth),
+                "weight_decay": weight_decay if decayed else 0.0,
+            },
+        )
+        group["params"].append(parameter)
+
+    return [groups[key] for key in sorted(groups)]
+
+
 class MotionFinetuneClassifier(MotionLinearClassifier):
     """Multi-label action classification over one window, backbone included."""
 
@@ -59,6 +141,10 @@ class MotionFinetuneClassifier(MotionLinearClassifier):
         min_lr_frac: float = 0.01,
         lr: float = 1e-3,
         backbone_lr: float = 1e-4,
+        # None keeps the flat `backbone_lr`, which is what every run before this knob
+        # existed used, so an old checkpoint's hparams still describe how it was trained.
+        # Set it and `backbone_lr` is ignored: the two are different answers to one question.
+        layer_decay: float | None = None,
         weight_decay: float = 0.05,
         dropout: float | None = None,
         warmup: float = 0.05,
@@ -73,6 +159,7 @@ class MotionFinetuneClassifier(MotionLinearClassifier):
         )
 
         self.backbone_lr = backbone_lr
+        self.layer_decay = layer_decay
         self.weight_decay = weight_decay
 
         # Undo the probe. The parent froze and eval'd the backbone in its own __init__,
@@ -104,8 +191,17 @@ class MotionFinetuneClassifier(MotionLinearClassifier):
         return self.head(self.pooler(self.backbone.embed_tokens(features)))
 
     def configure_optimizers(self):  # type: ignore
+        backbone = (
+            param_groups(self.backbone, self.backbone_lr, self.weight_decay)
+            if self.layer_decay is None
+            else layerwise_param_groups(
+                self.backbone, self.lr, self.weight_decay, self.layer_decay
+            )
+        )
+        # The head and the pooler sit at the top of the ladder, where the depth scale is 1,
+        # so they take `lr` under either scheme and this line does not branch.
         groups = [
-            *param_groups(self.backbone, self.backbone_lr, self.weight_decay),
+            *backbone,
             *param_groups(self.pooler, self.lr, self.weight_decay),
             *param_groups(self.head, self.lr, self.weight_decay),
         ]

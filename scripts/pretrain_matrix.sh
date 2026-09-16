@@ -31,7 +31,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 PYTHON=(${PYTHON:-uv run python})
 
-CORPUS=${CORPUS:-amass_motionx_clean}
+CORPUS=${CORPUS:-amass_clean}
 ARCH=${ARCH:-medium}
 EPOCHS=${EPOCHS:-100}
 
