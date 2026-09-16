@@ -24,6 +24,29 @@ class MeanMaxPooling(nn.Module):
         return t.cat([x_mean, x_max], dim=-1)
 
 
+class MomentPooling(nn.Module):
+    """Mean, standard deviation, min and max over the tokens, concatenated.
+
+    The reduction ``scripts/moments_baseline.py`` applies to raw windows, applied to the
+    embeddings instead, and in the same moment order so the two read alike. Parameter-free
+    like the mean, so the convex head can still use it.
+
+    It exists because "the pooled feature is near rank-1" is a statement about the *mean*
+    and nothing else. Spread and extremes over the same tokens are under no such
+    constraint, and where a minority of tokens carries the signal the mean is the one
+    summary guaranteed to drown them.
+    """
+
+    def __init__(self, in_dim: int, **_) -> None:
+        super().__init__()
+        self.out_dim = in_dim * 4
+
+    def forward(self, x: t.Tensor) -> t.Tensor:
+        return t.cat(
+            [x.mean(dim=1), x.std(dim=1), x.amin(dim=1), x.amax(dim=1)], dim=-1
+        )
+
+
 class SoftAttentivePooling(nn.Module):
     """Soft/Attentive Pooling via a small scoring network."""
     def __init__(self, in_dim: int, bottleneck_dim: int = 128, **_) -> None:
@@ -88,6 +111,7 @@ def get_pooler(pool_type: str, in_dim: int, num_d: int) -> nn.Module:
         "attentive_factorized": FactorizedAttentivePooling,
         "attentive": SoftAttentivePooling,
         "mean_max": MeanMaxPooling,
+        "moments": MomentPooling,
         "mean": MeanPooling
     }.get(pool_type)
 

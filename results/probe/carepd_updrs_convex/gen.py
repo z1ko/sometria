@@ -107,7 +107,10 @@ def collect() -> pl.DataFrame:
     """One row per (run, protocol group), with the provenance its own config.yaml records."""
 
     rows = []
-    for metrics_path in sorted(RUNS.rglob("in_*__loss_*/metrics.json")):
+    # `in_*`, not `in_*__loss_*`: an objective that reconstructs nothing names its cells
+    # for their input channels alone, and the narrower glob made every JEPA run invisible
+    # here rather than raising.
+    for metrics_path in sorted(RUNS.rglob("in_*/metrics.json")):
         run = metrics_path.parent
         parts = run.relative_to(RUNS).parts
         if len(parts) < 4:
@@ -127,7 +130,10 @@ def collect() -> pl.DataFrame:
                     "seed": seed,
                     "cell": cell,
                     "input": cell.removeprefix("in_").split("__")[0],
-                    "loss": cell.split("__loss_")[1],
+                    # None where the objective has no reconstruction target. Null rather
+                    # than a sentinel so it groups and renders as missing downstream
+                    # instead of pretending to be a fourth channel set.
+                    "loss": cell.split("__loss_")[1] if "__loss_" in cell else None,
                     "group": group,
                     **classify(group),
                     "folds": stats["folds"],
@@ -150,6 +156,28 @@ def collect() -> pl.DataFrame:
     if not rows:
         raise FileNotFoundError(f"no metrics.json under {RUNS}")
     return pl.DataFrame(rows)
+
+
+def has_loss_axis(df: pl.DataFrame) -> bool:
+    """Whether this subset's objective reconstructs channels at all.
+
+    MAE and SimMIM do, so their cells are `in_<x>__loss_<y>` and the matrix has two axes.
+    JEPA predicts an EMA teacher's embedding, has no reconstruction target, and names its
+    cells `in_<x>` -- so it can replicate the input-channel finding and never the
+    loss-channel one. Read off the rows, not off the architecture name.
+    """
+
+    return df["loss"].null_count() == 0
+
+
+def reference_cell(df: pl.DataFrame) -> str:
+    """The pre-specified cell for this subset. Same input channels either way.
+
+    Holding the *input* fixed is what makes the paper comparison like-for-like across
+    objectives; an objective with no loss axis simply has nothing to fix on the second one.
+    """
+
+    return REFERENCE_CELL if has_loss_axis(df) else REFERENCE_CELL.split("__")[0]
 
 
 def macro_f1(true: list[str], predicted: list[str], labels: list[str]) -> float:
@@ -255,10 +283,11 @@ def protocol_table(df: pl.DataFrame, protocol: str, floors: dict, reference: dic
     metrics.csv, and the ranking question is answered pooled and paired in table 3.
     """
 
-    subset = df.filter((pl.col("protocol") == protocol) & (pl.col("cell") == REFERENCE_CELL))
+    cell = reference_cell(df)
+    subset = df.filter((pl.col("protocol") == protocol) & (pl.col("cell") == cell))
     paper = reference.get({"loso": "within_dataset_loso", "lodo": "lodo"}.get(protocol, ""), {})
 
-    header = ["target", "folds", "majority floor", f"ours (`{REFERENCE_CELL}`)"]
+    header = ["target", "folds", "majority floor", f"ours (`{cell}`)"]
     align = "| :--- | ---: | ---: | ---: |"
     if paper:
         banded = any("mean" in e for e in paper.values() if isinstance(e, dict))
@@ -451,11 +480,11 @@ def architecture_table(df: pl.DataFrame) -> list[str]:
         return []
     baseline, *others = present
 
-    def per_run(arch: str, protocols: tuple[str, ...]) -> dict[tuple[str, str], float]:
+    def per_run(arch: str, protocols: tuple[str, ...], key: str) -> dict[tuple[str, str], float]:
         rows = df.filter(pl.col("arch") == arch) if arch else df
         rows = rows.filter(pl.col("protocol").is_in(list(protocols)))
-        grouped = rows.group_by("cell", "seed").agg(pl.col(PRIMARY).mean())
-        return {(r["cell"], r["seed"]): r[PRIMARY] for r in grouped.iter_rows(named=True)}
+        grouped = rows.group_by(key, "seed").agg(pl.col(PRIMARY).mean())
+        return {(r[key], r["seed"]): r[PRIMARY] for r in grouped.iter_rows(named=True)}
 
     families = [(k, (k,)) for k in ("loso", "lodo", "cross")] + [("all", ("loso", "lodo", "cross"))]
 
@@ -472,9 +501,15 @@ def architecture_table(df: pl.DataFrame) -> list[str]:
         "| :--- |" + " ---: |" * (len(present) + 2) + " :--- |",
     ]
     for label, protocols in families:
-        base = per_run(baseline, protocols)
         for arch in others:
-            mine = per_run(arch, protocols)
+            # Cells pair only between two objectives that both name a loss axis. JEPA's
+            # `in_<x>` shares no key with `in_<x>__loss_<y>`, so pairing on the cell would
+            # find nothing in common and drop the row without saying why. Falling back to
+            # the input channels averages the loss axis away on whichever side has one --
+            # the only axis the two objectives actually share.
+            key = "cell" if has_loss_axis(df.filter(pl.col("arch").is_in([baseline, arch]))) else "input"
+            base = per_run(baseline, protocols, key)
+            mine = per_run(arch, protocols, key)
             shared = sorted(set(base) & set(mine))
             if not shared:
                 continue
@@ -495,8 +530,10 @@ def architecture_table(df: pl.DataFrame) -> list[str]:
             )
     lines += [
         "",
-        f"*Δ is `{others[0]}` − `{baseline}`, paired on (cell, seed) with protocol groups "
-        "averaged inside each family first. Positive favours the second architecture. "
+        f"*Δ is each architecture − `{baseline}`, paired on (cell, seed) with protocol "
+        "groups averaged inside each family first, or on (input channels, seed) where one "
+        "of the two objectives has no loss axis to pair on. Positive favours the row's "
+        "architecture. "
         "Levels are over the paired subset only, so they differ slightly from the tables "
         "above where coverage is uneven.*",
         "",
@@ -615,7 +652,7 @@ def marginal_table(df: pl.DataFrame) -> list[str]:
         subset = df.filter(pl.col("protocol") == protocol)
         if subset.is_empty():
             continue
-        for axis in ("input", "loss"):
+        for axis in ("input", "loss") if has_loss_axis(subset) else ("input",):
             marginal = {
                 r[axis]: r[PRIMARY]
                 for r in subset.group_by(axis).agg(pl.col(PRIMARY).mean()).iter_rows(named=True)
@@ -809,7 +846,7 @@ def tables(df: pl.DataFrame) -> str:
                 "",
                 protocol_table(subset, protocol, floors, reference),
                 "",
-                f"*One cell, `{REFERENCE_CELL}`, fixed in advance -- not the best of "
+                f"*One cell, `{reference_cell(subset)}`, fixed in advance -- not the best of "
                 f"{subset['cell'].n_unique()}, which would be biased upward by the "
                 "selection and not comparable with the paper's single pre-specified "
                 "protocol. The paper column is a spread across published encoders, not a "

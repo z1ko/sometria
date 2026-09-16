@@ -99,7 +99,7 @@ model:
   name: classifier
   checkpoint: null       # set by probe_convex_mae.py --checkpoint
   encoder: teacher
-  pool: mean             # convex probe accepts "mean" | "mean_max" only
+  pool: mean             # convex probe accepts "mean" | "mean_max" | "moments" only
   lr: 0.001
 
 training:

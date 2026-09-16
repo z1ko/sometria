@@ -163,6 +163,7 @@ def _probe(pool="mean", **kwargs):
 
 def test_every_pooling_gives_the_head_the_width_it_advertises():
     widths = {"mean": SPEC.d_model, "mean_max": 2 * SPEC.d_model,
+              "moments": 4 * SPEC.d_model,
               "attentive": SPEC.d_model, "attentive_factorized": SPEC.d_model}
 
     x = _features()
@@ -170,6 +171,21 @@ def test_every_pooling_gives_the_head_the_width_it_advertises():
         model = _probe(pool)
         assert model(x).shape == (2, LABELS), pool
         assert model.head[1].in_features == width, pool
+
+
+def test_the_moment_pooler_stacks_its_blocks_in_the_documented_order():
+    """A reader slicing the first d_model columns has to get the mean, not the max."""
+
+    model = _probe("moments").eval()
+    x = _features(batch=1)
+    with t.no_grad():
+        tokens = model.backbone.embed_tokens(x)
+        pooled = model.pooler(tokens)
+    d = SPEC.d_model
+    for i, expected in enumerate(
+        [tokens.mean(1), tokens.std(1), tokens.amin(1), tokens.amax(1)]
+    ):
+        assert t.allclose(pooled[:, i * d : (i + 1) * d], expected, atol=1e-5), i
 
 
 def test_a_pooler_reads_the_grid_not_a_flat_sequence():

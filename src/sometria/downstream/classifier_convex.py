@@ -1,8 +1,8 @@
 """Convex alternative to :class:`~sometria.downstream.classifier.MotionLinearClassifier`.
 
-``mean``/``mean_max`` pooling add no parameters, and BCE over one ``Linear`` head is then
-a per-label logistic regression -- convex, one global optimum, nothing for AdamW's
-lr/warmup/epoch-budget to get wrong. So fit it with L-BFGS to convergence on features
+``mean``/``mean_max``/``moments`` pooling add no parameters, and BCE over one ``Linear``
+head is then a per-label logistic regression -- convex, one global optimum, nothing for
+AdamW's lr/warmup/epoch-budget to get wrong. So fit it with L-BFGS to convergence on features
 extracted once from the frozen backbone, instead of training it like a neural net.
 
 The attentive poolers are excluded here on purpose: they carry their own weights, which
@@ -24,7 +24,7 @@ from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAverageP
 from sometria.downstream.pooling import get_pooler
 from torchmetrics.classification import MultilabelAveragePrecision, MultilabelF1Score
 
-_CONVEX_POOLS = {"mean", "mean_max"}
+_CONVEX_POOLS = {"mean", "mean_max", "moments"}
 
 # Log-spaced from 1e-1 (visibly over-regularized on the checkpoint matrix, macro mAP
 # ~0.20) down to 1e-6. Extends past where the matrix run's optimum landed (1e-5, still

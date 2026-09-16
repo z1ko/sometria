@@ -46,7 +46,7 @@ model:
   name: classifier
   checkpoint: null       # passed with --checkpoint; a value here is only the from-scratch control's
   encoder: teacher       # which submodule of the checkpoint holds the weights
-  pool: mean             # "mean" | "mean_max" | "attentive" | "attentive_factorized"
+  pool: mean             # "mean" | "mean_max" | "moments" | "attentive" | "attentive_factorized"
   lr: 0.001
 
 training:

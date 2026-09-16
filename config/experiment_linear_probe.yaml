@@ -40,7 +40,7 @@ model:
   name: classifier
   checkpoint: runs/mamp/lightning_logs/version_0/checkpoints/epoch=9-step=7240.ckpt       # e.g. runs/mamp/lightning_logs/version_0/checkpoints/last.ckpt
   encoder: teacher       # which submodule of the checkpoint holds the weights
-  pool: mean             # "mean" | "mean_max" | "attentive" | "attentive_factorized"
+  pool: mean             # "mean" | "mean_max" | "moments" | "attentive" | "attentive_factorized"
   lr: 0.001
 
 training:
