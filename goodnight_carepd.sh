@@ -4,6 +4,8 @@
 #
 #   bash goodnight_carepd.sh                     # amass_clean/medium_100ep, seed42, 9 cells
 #   SEEDS="42 1 2" bash goodnight_carepd.sh      # all three pretraining replicates
+#   OBJECTIVE=simmim SEEDS="42 1 2" bash goodnight_carepd.sh
+#   OBJECTIVE=jepa   SEEDS="42 1 2" bash goodnight_carepd.sh
 #   CELLS="in_pk__loss_pk in_pk__loss_pkd" SEEDS="42 1 2" bash goodnight_carepd.sh
 #   CORPUS=amass_motionx_clean bash goodnight_carepd.sh
 #   DRY=1 bash goodnight_carepd.sh               # print the plan and exit
@@ -38,10 +40,23 @@ CORPUS=${CORPUS:-amass_clean}
 ARCH=${ARCH:-medium}
 EPOCHS=${EPOCHS:-100}
 SEEDS=${SEEDS:-42}
-# Which input/loss cells to score. Names or globs, space separated. The default is every
-# cell of the matrix; narrow it to try a protocol out on two cells before committing an
-# evening to twenty-seven.
-CELLS=${CELLS:-in_*__loss_*}
+
+# Which pretraining objective's tree to read, same knob and same asymmetry as
+# scripts/probe_matrix.sh: empty for MAE so every run already on disk keeps its path,
+# `_jepa` and so on otherwise. Named rather than sniffed -- this script only ever sees the
+# probe config, which says nothing about how the backbone was trained.
+OBJECTIVE=${OBJECTIVE:-mae}
+SUFFIX=""
+[ "$OBJECTIVE" != "mae" ] && SUFFIX="_$OBJECTIVE"
+
+# Which cells to score. Names or globs, space separated. The default is every cell of the
+# matrix; narrow it to try a protocol out on two cells before committing an evening to
+# twenty-seven.
+#
+# `in_*`, not `in_*__loss_*`: an objective that reconstructs nothing names its cells for
+# their input channels alone, so the narrower glob matched none of JEPA's and would have
+# reported "no cell matches" for a tree that is sitting right there.
+CELLS=${CELLS:-in_*}
 BENCHMARK=${BENCHMARK:-carepd_updrs_convex}
 CONFIG=${CONFIG:-config/experiment_probe_carepd.yaml}
 DATALOADER=${DATALOADER:-config/dataloader/${CORPUS}.yaml}
@@ -80,8 +95,8 @@ if [ -z "$NORMALIZATION" ]; then
     exit 1
 fi
 
-PRETRAIN=${PRETRAIN:-runs/pretrain/${CORPUS}/${ARCH}_${EPOCHS}ep}
-OUT=${OUT:-runs/probe/${BENCHMARK}/protocols/${CORPUS}/${ARCH}_${EPOCHS}ep}
+PRETRAIN=${PRETRAIN:-runs/pretrain/${CORPUS}/${ARCH}_${EPOCHS}ep${SUFFIX}}
+OUT=${OUT:-runs/probe/${BENCHMARK}/protocols/${CORPUS}/${ARCH}_${EPOCHS}ep${SUFFIX}}
 
 stage "start"
 echo "log         $LOG"
@@ -89,6 +104,7 @@ echo "benchmark   $BENCHMARK  ($CONFIG)"
 echo "corpus      $CORPUS  ($DATALOADER)"
 echo "normalize   $NORMALIZATION"
 echo "arch        $ARCH  epochs $EPOCHS  seeds $SEEDS"
+echo "objective   $OBJECTIVE"
 echo "cells       $CELLS"
 echo "protocols   $SPLIT_SETS"
 echo "tune on     $TUNE_ON  (by $SELECT_ON)"

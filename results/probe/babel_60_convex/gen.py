@@ -21,7 +21,14 @@ import json
 from pathlib import Path
 from statistics import NormalDist
 
+import matplotlib
+
+matplotlib.use("Agg")  # figures are written to disk, never shown
+
+import matplotlib.pyplot as plt
+import numpy as np
 import polars as pl
+from matplotlib.colors import LinearSegmentedColormap
 from omegaconf import OmegaConf
 from scipy import integrate, stats
 
@@ -29,6 +36,12 @@ BENCHMARK = Path(__file__).resolve().parent.name
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 RUNS = ROOT / "runs" / "probe" / BENCHMARK
+
+# Corpora held out of the report for now. The runs stay where they are and metrics.json is
+# still read; this only decides what gets tabulated and plotted, so deleting a name here
+# brings that corpus back with one rerun. Named in the generated header so a reader of
+# README.md can see something was left out rather than assuming it was never run.
+EXCLUDE_CORPORA = {"amass_motionx_clean"}
 
 # The sweep axes, in width order rather than alphabetical, so a table reads narrow to wide.
 AXIS = ["p", "pk", "pkd"]
@@ -248,6 +261,7 @@ def delta(df: pl.DataFrame, base: str, other: str, arch: str, metric: str) -> tu
     # measured one is less wrong than pretending its variance is zero.
     sigma = next((x for x in (sigma_a, sigma_b) if x is not None), None)
     se = None if sigma is None else sigma * (1 / n_a + 1 / n_b) ** 0.5
+    diffs = {key: b[key] - a[key] for key in a.keys() & b.keys()}
 
     # The key is (input, loss) either way; an objective with no loss axis just has None in
     # the second slot, so one column rather than three.
@@ -260,11 +274,10 @@ def delta(df: pl.DataFrame, base: str, other: str, arch: str, metric: str) -> tu
     for row in AXIS:
         cells = []
         for col in columns:
-            key = (row, col)
-            if key not in a or key not in b:
+            d = diffs.get((row, col))
+            if d is None:
                 cells.append("--")
                 continue
-            d = b[key] - a[key]
             cells.append(f"{d:+.4f}" if se is None else f"{d:+.4f} ({d / se:+.1f}σ)")
         lines.append(f"| **{row}** | " + " | ".join(cells) + " |")
 
@@ -541,12 +554,411 @@ def reference_points(df: pl.DataFrame) -> list[str]:
     return lines
 
 
+# ---------------------------------------------------------------------------
+# Figures.
+#
+# The tables above are the record; these are for reading the record at a glance.
+# Three axes, one figure each: the matrix of one (corpus, arch), the objectives
+# against each other on one corpus, and one objective across corpora.
+#
+# Colors are not chosen by eye. Magnitude gets one hue light->dark, polarity gets
+# nothing (the zero line and the bands carry the sign, so a red/blue split would
+# encode it twice), and the four architecture hues are a fixed order validated for
+# colorblind separation -- worst adjacent pair dE 9.1 under protanopia, above the
+# 8 bar. Two of them fall under 3:1 against the surface, so every line is also
+# labelled at its right end rather than identified by color alone.
+SEQUENTIAL = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
+INK, MUTED, GRID, MISSING = "#1a1a19", "#5c5c58", "#e6e5e1", "#f0efec"
+SURFACE = "#fcfcfb"
+
+FIGURES = HERE / "figures"
+
+
+def _style(ax: "plt.Axes") -> None:
+    """Recessive frame: the marks carry the chart, the box around them does not."""
+
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(GRID)
+    ax.tick_params(colors=MUTED, labelsize=8, length=3)
+    ax.set_facecolor(SURFACE)
+
+
+def _save(fig: "plt.Figure", name: str) -> str:
+    FIGURES.mkdir(exist_ok=True)
+    fig.savefig(FIGURES / name, dpi=200, bbox_inches="tight", facecolor=SURFACE)
+    plt.close(fig)
+    return f"figures/{name}"
+
+
+def cell_means(group: pl.DataFrame, metric: str) -> dict[tuple[str, str | None], tuple[float, float | None]]:
+    """(input, loss) -> (mean over replicates, sd where there is more than one)."""
+
+    out = {}
+    for (inp, loss), cell in group.group_by("input", "loss"):
+        values = cell[metric]
+        out[(inp, loss)] = (values.mean(), values.std() if len(values) > 1 else None)
+    return out
+
+
+def fig_matrix(df: pl.DataFrame, metric: str) -> str | None:
+    """Every (corpus, arch) matrix as a small multiple, each on its own color scale.
+
+    Color ranks cells *within* a panel and says nothing across panels -- the same
+    convention the tables use, where the percentage beside a cell is its shortfall
+    against the best cell of that table and never against another table's. A shared
+    scale would rank the objectives against each other instead, at the cost of
+    flattening the 0.345-0.367 MAE matrix into one uniform block; the levels are what
+    the printed numbers and the ladder figure are for.
+
+    Every (corpus, arch) that was probed gets a panel, including the ones with a single
+    filled cell: the eight blanks around it are the point, since what a corpus has *not*
+    been swept over is as much a fact about the board as the scores that exist. A lone
+    cell is drawn mid-ramp -- with nothing to rank it against, its shade means nothing.
+    """
+
+    panels = []
+    for (corpus, arch), group in sorted(df.group_by("corpus", "arch")):
+        means = cell_means(group, metric)
+        panels.append((corpus, arch, means, has_loss_axis(group)))
+    if not panels:
+        return None
+
+    cmap = LinearSegmentedColormap.from_list("sequential", SEQUENTIAL)
+    cmap.set_bad(MISSING)
+
+    ncols = min(3, len(panels))
+    nrows = -(-len(panels) // ncols)
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(3.4 * ncols, 3.6 * nrows), squeeze=False, layout="constrained"
+    )
+    for ax in axes.flat:
+        ax.set_axis_off()
+
+    for ax, (corpus, arch, means, loss_axis) in zip(axes.flat, panels):
+        columns = AXIS if loss_axis else [None]
+        grid = np.full((len(AXIS), len(columns)), np.nan)
+        for i, row in enumerate(AXIS):
+            for j, col in enumerate(columns):
+                if (row, col) in means:
+                    grid[i, j] = means[(row, col)][0]
+
+        lo = min(mean for mean, _ in means.values())
+        hi = max(mean for mean, _ in means.values())
+        # One cell has no range to normalize against; widen it so the cell lands mid-ramp
+        # rather than at the dark end, where it would read as a top score.
+        span = (lo, hi) if hi > lo else (lo * 0.98, hi * 1.02)
+        ax.set_axis_on()
+        ax.imshow(grid, cmap=cmap, vmin=span[0], vmax=span[1], aspect="equal")
+        ax.set_xticks(range(len(columns)), [c or "--" for c in columns])
+        ax.set_yticks(range(len(AXIS)), AXIS)
+        ax.set_xlabel("loss channels" if loss_axis else "no loss axis", fontsize=8, color=MUTED)
+        ax.set_ylabel("input channels", fontsize=8, color=MUTED)
+        # Range in the title, since each panel carries its own scale and there is no
+        # shared bar to read it off.
+        extent = f"{lo:.3f} – {hi:.3f}" if hi > lo else f"{lo:.3f}, one cell"
+        ax.set_title(f"{corpus}\n{arch}\n{extent}", fontsize=9, color=INK)
+        _style(ax)
+        ax.spines["left"].set_visible(False)
+        ax.spines["bottom"].set_visible(False)
+        ax.tick_params(length=0)
+
+        for i, row in enumerate(AXIS):
+            for j, col in enumerate(columns):
+                entry = means.get((row, col))
+                if entry is None:
+                    continue
+                mean, sd = entry
+                # Ink flips on the dark half of the ramp so the number stays readable
+                # in the strongest cells as well as the palest.
+                shade = INK if (mean - span[0]) / (span[1] - span[0]) < 0.55 else SURFACE
+                ax.text(j, i - (0.1 if sd else 0), f"{mean:.3f}", ha="center", va="center",
+                        fontsize=9, color=shade)
+                if sd:
+                    ax.text(j, i + 0.18, f"±{sd:.3f}", ha="center", va="center",
+                            fontsize=6.5, color=shade)
+
+    # No colorbar: with a per-panel scale one bar would be wrong for every panel but the
+    # one it was drawn from. Each panel's range is in its title instead.
+    fig.suptitle(
+        f"{TITLES.get(metric, metric)} -- color is within-panel only", fontsize=9, color=MUTED
+    )
+    return _save(fig, f"{metric}_matrix.png")
+
+
+def corpus_color(corpus: str, df: pl.DataFrame) -> str:
+    """The hue a corpus owns, indexed over every corpus including the held-out ones.
+
+    Color follows the entity, not its rank in whatever subset is being drawn. Indexing
+    into the corpora actually present meant excluding `amass_motionx_clean` repainted
+    `amass_smpl` from the third hue to the second, so the same corpus was a different
+    color in two regenerations of the same figure.
+    """
+
+    order = sorted(set(df["corpus"]) | EXCLUDE_CORPORA)
+    return SERIES[order.index(corpus) % len(SERIES)]
+
+
+def _short(arch: str) -> str:
+    """Architecture name minus the part every architecture shares.
+
+    `medium_100ep_simmim` does not fit over a two-bar panel, and the prefix is the same
+    on every one of them, so it distinguishes nothing. Derived from the name rather than
+    a lookup table, since the objective suffix is the naming convention this whole report
+    reads architectures through.
+    """
+
+    return arch.replace("medium_100ep", "").lstrip("_") or "mae"
+
+
+def _spread(ax: "plt.Axes", labels: list[tuple[float, float, str, str]]) -> None:
+    """Right-end labels nudged apart where two architectures land on the same score.
+
+    Needed because the labels are the relief for a palette whose weaker hues fall under
+    3:1 against the surface -- two labels printed on top of each other are worse than
+    the color alone, which is what `jepa` and `mask70` did at `pkd`.
+    """
+
+    if not labels:
+        return
+    low, high = ax.get_ylim()
+    gap = 0.05 * (high - low)
+    placed = None
+    for y, x, text, color in sorted(labels):
+        y = y if placed is None else max(y, placed + gap)
+        placed = y
+        ax.annotate(text, (x, y), textcoords="offset points", xytext=(6, 0),
+                    fontsize=7, color=color, va="center")
+
+
+def fig_ladder(df: pl.DataFrame, metric: str) -> str | None:
+    """One ladder per architecture: what each sweep axis buys, corpus against corpus.
+
+    Split per architecture rather than drawing every objective on one pair of panels. A
+    shared y-axis has to span SimMIM at 0.12 and MAE at 0.37, and at that scale MAE's
+    ladder -- the +0.016 the loss axis actually buys, which is the whole loss-channel
+    finding -- is a flat line. A row per architecture, each row on its own scale, shows
+    the shape of every objective's ladder; the `moments` line drawn in each panel is the
+    fixed thing that keeps rows comparable, and the matrices carry the absolute levels.
+
+    Lines are corpora, so each panel also answers the same-model-across-corpora question
+    directly rather than through a difference table.
+
+    Points average over the other axis within a replicate first, then over replicates,
+    matching the pairing in :func:`marginals`. Error bars are the seed sd and appear only
+    where the level has more than one replicate.
+    """
+
+    archs = sorted(df["arch"].unique())
+    corpora = sorted(df["corpus"].unique())
+    columns = ["input", "loss"] if has_loss_axis(df) else ["input"]
+
+    fig, axes = plt.subplots(
+        len(archs), len(columns), figsize=(3.8 * len(columns), 2.7 * len(archs)),
+        squeeze=False, sharey="row", sharex=True,
+    )
+    for r, arch in enumerate(archs):
+        subset = df.filter(pl.col("arch") == arch)
+        live = []
+        for c, axis in enumerate(columns):
+            ax = axes[r][c]
+            # An objective with no reconstruction target has no loss panel to draw. Blank
+            # it rather than plotting an empty frame that implies a sweep that never ran.
+            if axis == "loss" and not has_loss_axis(subset):
+                ax.set_axis_off()
+                continue
+            live.append(ax)
+            _style(ax)
+            ax.grid(axis="y", color=GRID, linewidth=0.8)
+            ax.set_axisbelow(True)
+
+            labels = []
+            for corpus in corpora:
+                group = subset.filter(pl.col("corpus") == corpus)
+                if group.is_empty():
+                    continue
+                per_rep = group.group_by("replicate", axis).agg(pl.col(metric).mean())
+                points = [
+                    (AXIS.index(level), values.mean(), values.std() if len(values) > 1 else None)
+                    for level in AXIS
+                    if len(values := per_rep.filter(pl.col(axis) == level)[metric])
+                ]
+                if not points:
+                    continue
+                color = corpus_color(corpus, df)
+                x, y = [p[0] for p in points], [p[1] for p in points]
+                ax.errorbar(x, y, yerr=[p[2] or 0.0 for p in points], color=color, linewidth=2,
+                            marker="o", markersize=6, capsize=3, elinewidth=1, label=corpus)
+                labels.append((y[-1], x[-1], corpus.removeprefix("amass_"), color))
+            _spread(ax, labels)
+
+            ax.set_xticks(range(len(AXIS)), AXIS)
+            ax.set_xlim(-0.35, len(AXIS) - 0.3)
+            if r == len(archs) - 1:
+                ax.set_xlabel(f"{axis} channels", fontsize=8, color=MUTED)
+            if r == 0:
+                ax.set_title(f"{axis} channels", fontsize=9, color=INK)
+
+        axes[r][0].set_ylabel(f"{arch}\n{TITLES.get(metric, metric)}", fontsize=8, color=INK)
+
+        # Reference lines, but only those inside the span this row's runs occupy: chance at
+        # 0.04 would rescale every panel to hide the differences the figure exists for.
+        path = HERE / "baselines.json"
+        if path.exists():
+            low, high = axes[r][0].get_ylim()
+            for name, entry in json.loads(path.read_text()).items():
+                value = entry.get(metric)
+                if value is None or not low < value < high:
+                    continue
+                # `live` only: a blanked panel still holds an axes object, and drawing the
+                # line there left `moments` floating in the frame JEPA has no sweep for.
+                for ax in live:
+                    ax.axhline(value, color=MUTED, linewidth=1, linestyle="--", zorder=0)
+                live[-1].annotate(name, (len(AXIS) - 1, value), textcoords="offset points",
+                                  xytext=(0, 4), fontsize=7, color=MUTED, ha="right")
+
+    handles, labels = [], []
+    for ax in axes.flat:
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            if label not in labels:
+                handles.append(handle)
+                labels.append(label)
+    if not handles:
+        plt.close(fig)
+        return None
+    fig.legend(handles, labels, loc="lower center", ncols=len(labels), frameon=False,
+               fontsize=8, bbox_to_anchor=(0.5, -0.02))
+    fig.tight_layout()
+    return _save(fig, f"{metric}_ladder.png")
+
+
+def fig_corpora(df: pl.DataFrame, metric: str) -> str | None:
+    """Corpus against corpus, cell by cell, one panel per architecture and challenger.
+
+    A panel holds only the cells both corpora were actually probed on -- `amass_smpl` has
+    one, so its panels are one pair of bars wide while `amass_motionx_clean` gets nine.
+    Panel width follows the cell count, so a one-cell comparison cannot look as
+    substantial as a nine-cell one.
+
+    Cell by cell rather than averaged over the matched cells: the average says whether
+    the corpus moved the architecture overall, and hides that it could have moved
+    `in_p__loss_p` up and `in_pkd__loss_pkd` down. Error bars are the seed sd of that
+    cell, the same number the matrix prints beside it.
+
+    Bars run from zero, so the differences look as small as they are -- for MAE and JEPA
+    they are, and the delta tables carry the signed numbers with their error bars.
+    """
+
+    corpora = sorted(df["corpus"].unique())
+    if len(corpora) < 2:
+        return None
+    base = corpora[0]
+
+    panels = []
+    for arch in sorted(df["arch"].unique()):
+        subset = df.filter(pl.col("arch") == arch)
+        per_corpus = {
+            corpus: cell_means(subset.filter(pl.col("corpus") == corpus), metric)
+            for corpus in corpora
+        }
+        for other in corpora[1:]:
+            keys = sorted(
+                per_corpus[base].keys() & per_corpus[other].keys(),
+                key=lambda k: (AXIS.index(k[0]), AXIS.index(k[1]) if k[1] else -1),
+            )
+            if keys:
+                panels.append((arch, other, keys, per_corpus))
+    if not panels:
+        return None
+
+    fig, axes = plt.subplots(
+        1, len(panels), squeeze=False, layout="constrained", sharey=True,
+        figsize=(0.55 * sum(len(keys) for _, _, keys, _ in panels) + 0.9 * len(panels), 4.0),
+        gridspec_kw={"width_ratios": [len(keys) + 0.6 for _, _, keys, _ in panels]},
+    )
+    width = 0.38
+    seen = set()
+    for ax, (arch, other, keys, per_corpus) in zip(axes[0], panels):
+        _style(ax)
+        ax.grid(axis="y", color=GRID, linewidth=0.8)
+        ax.set_axisbelow(True)
+        for b, corpus in enumerate((base, other)):
+            values = [per_corpus[corpus][key] for key in keys]
+            ax.bar(
+                [i + (b - 0.5) * width for i in range(len(keys))],
+                [mean for mean, _ in values],
+                width * 0.94,
+                color=corpus_color(corpus, df),
+                yerr=[sd or 0.0 for _, sd in values],
+                ecolor=INK, capsize=3, error_kw={"elinewidth": 1},
+                label=None if corpus in seen else corpus,
+            )
+            seen.add(corpus)
+        ax.set_xticks(
+            range(len(keys)),
+            ["/".join(part for part in key if part) for key in keys],
+            fontsize=7, rotation=45 if len(keys) > 3 else 0,
+            ha="right" if len(keys) > 3 else "center",
+        )
+        ax.set_xlim(-0.6, len(keys) - 0.4)
+        ax.set_xlabel("input / loss", fontsize=8, color=MUTED)
+        ax.set_title(f"{_short(arch)}\nvs {other.removeprefix('amass_')}", fontsize=9, color=INK)
+    axes[0][0].set_ylabel(TITLES.get(metric, metric), fontsize=8, color=MUTED)
+
+    path = HERE / "baselines.json"
+    if path.exists():
+        for name, entry in json.loads(path.read_text()).items():
+            value = entry.get(metric)
+            if value is None or value > axes[0][0].get_ylim()[1]:
+                continue
+            for ax in axes[0]:
+                ax.axhline(value, color=MUTED, linewidth=1, linestyle="--", zorder=0)
+            axes[0][0].annotate(
+                name, (0, value), xycoords=("axes fraction", "data"),
+                textcoords="offset points", xytext=(2, 3), ha="left", fontsize=7, color=MUTED,
+                bbox={"facecolor": SURFACE, "edgecolor": "none", "pad": 1},
+            )
+
+    handles, labels = [], []
+    for ax in axes[0]:
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            if label not in labels:
+                handles.append(handle)
+                labels.append(label)
+    fig.legend(handles, labels, loc="outside lower center", ncols=len(labels), frameon=False,
+               fontsize=8)
+    return _save(fig, f"{metric}_corpora.png")
+
+
+def figures(df: pl.DataFrame, metric: str) -> list[str]:
+    """The three figures for one metric, as markdown, skipping any the data cannot fill."""
+
+    made = [
+        ("Each matrix on its own color scale", fig_matrix(df, metric)),
+        ("What each axis buys, per architecture", fig_ladder(df, metric)),
+        ("Corpus against corpus, cell by cell", fig_corpora(df, metric)),
+    ]
+    lines = []
+    for caption, path in made:
+        if path:
+            lines += [f"![{caption}]({path})", "", f"*{caption}.*", ""]
+    return lines
+
+
 def tables(df: pl.DataFrame) -> str:
     corpora = sorted(df["corpus"].unique())
     parts = [
         f"*{len(df)} cells across {len(corpora)} corpora and "
         f"{df['arch'].n_unique()} architectures. Regenerate with `gen.py`.*",
         "",
+        *(
+            [f"*Held out of this report: {', '.join(f'`{c}`' for c in sorted(EXCLUDE_CORPORA))}. "
+             "The runs exist; `EXCLUDE_CORPORA` in `gen.py` is what drops them.*", ""]
+            if EXCLUDE_CORPORA
+            else []
+        ),
         "*An architecture whose name carries an objective suffix (`_jepa`, `_simmim`) was "
         "pretrained with that objective; an unsuffixed one is the MAE baseline. JEPA has no "
         "reconstruction target, so its sections tabulate the input axis alone and it cannot "
@@ -560,6 +972,9 @@ def tables(df: pl.DataFrame) -> str:
 
     for metric in REPORTED:
         parts += [f"## {TITLES.get(metric, metric)}", ""]
+        # Figures first: they are the same numbers as the tables under them, read at a
+        # glance rather than cell by cell.
+        parts += figures(df, metric)
         for corpus in corpora:
             for arch in sorted(df.filter(pl.col("corpus") == corpus)["arch"].unique()):
                 subset = df.filter((pl.col("corpus") == corpus) & (pl.col("arch") == arch))
@@ -658,7 +1073,9 @@ def splice(readme: Path, generated: str) -> None:
 
 
 def main() -> None:
-    df = collect().sort("corpus", "arch", "input", "loss")
+    df = collect().filter(~pl.col("corpus").is_in(list(EXCLUDE_CORPORA))).sort(
+        "corpus", "arch", "input", "loss"
+    )
     df.write_csv(HERE / "metrics.csv")
     splice(HERE / "README.md", tables(df))
     print(f"{len(df)} cells -> {HERE / 'metrics.csv'} and README.md")

@@ -110,6 +110,20 @@ BENCHMARK=carepd_updrs_convex CONFIG=config/experiment_probe_carepd.yaml \
   SPLIT_SET=carepd_lodo_BMCLab ./scripts/probe_matrix.sh
 ```
 
+That scores one split set. CARE-PD's published protocols are 126 of them, and the frozen
+backbone means all 126 read the same features, so `goodnight_carepd.sh` extracts once per
+cell and reduces each fold to an L-BFGS solve. It takes the same `OBJECTIVE` knob:
+
+```bash
+SEEDS="42 1 2" bash goodnight_carepd.sh
+OBJECTIVE=simmim SEEDS="42 1 2" bash goodnight_carepd.sh
+OBJECTIVE=jepa   SEEDS="42 1 2" bash goodnight_carepd.sh
+DRY=1 bash goodnight_carepd.sh    # print the plan, change nothing
+```
+
+The SMPL arm cannot be scored here: CARE-PD is imported in the OpenSim representation
+only, and an `amass_smpl` backbone expects 21 DOF x 18 features against `config/smpl.yaml`.
+
 A single checkpoint, without the sweep. Pass a run directory and it takes the monitored
 best checkpoint; pass a `.ckpt` path and it takes that one. The objective is resolved from
 the weights, so nothing needs to be told which model wrote the file:

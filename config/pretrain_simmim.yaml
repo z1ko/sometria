@@ -32,7 +32,7 @@ model:
   enc_depth: 8
   # No dec_depth/dec_dim: the head is a single Linear, per the paper's Table 2, where it
   # ties a 2-layer MLP at 82.8 for 0.8x the cost and beats both inverse-Swin decoders.
-  mask_ratio: 0.9
+  mask_ratio: 0.6
   min_lr_ratio: 0.5
   warmup: 0.05
   weight_decay: 0.05

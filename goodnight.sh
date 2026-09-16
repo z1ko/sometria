@@ -52,7 +52,7 @@ echo "log: $LOG"
 # files these rows beside the MAE arm's.
 SMPL_STACK=(config/dataloader/amass_smpl.yaml)
 SMPL_NORM=stats/smpl_rot6d_log_vel_acc_v1/pretrain_paired_v1_train_clean.pt
-SMPL_SEED=${SMPL_SEED:-42}
+SMPL_SEED=${SMPL_SEED:-1}
 
 smpl_run() {   # objective  size-config  probe-cell-name
     local objective=$1 size=$2 cell=$3
