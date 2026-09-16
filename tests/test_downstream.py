@@ -2,7 +2,6 @@
 
 import pickle
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,14 +11,13 @@ import torch as t
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sometria.architecture.encoder import EncoderSpec, MotionTransformerEncoder, load_encoder
+from sometria.architecture.encoder import EncoderSpec, MotionTransformerEncoder
 from sometria.architecture.scheduler import lr_schedule
 from sometria.downstream.dataset import LabelledWindows, _tiles
 from sometria.downstream.classifier import MotionLinearClassifier
 from sometria.downstream.finetune import MotionFinetuneClassifier, depth_of
 from sometria.downstream.labels import window_multi_hot
 from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAveragePrecision
-from sometria.models.mamp import MaskedMotionPredictor
 
 SPEC = EncoderSpec(d_model=32, depth=1, num_heads=4)
 D = SPEC.num_dofs
@@ -396,25 +394,6 @@ def test_both_finetune_rates_decay_together():
         scheduler.step()
 
     assert all(g["lr"] < 0.02 * g["initial_lr"] for g in optimizer.param_groups)
-
-
-def test_a_pretrained_backbone_arrives_with_its_weights():
-    objective = MaskedMotionPredictor(SPEC, decoder_depth=1)
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "pretrain.ckpt"
-        t.save(
-            {
-                "state_dict": objective.state_dict(),
-                "hyper_parameters": dict(objective.hparams),
-                "pytorch-lightning_version": "2.0.0",
-                "loops": {},
-            },
-            path,
-        )
-        backbone = load_encoder(str(path), "backbone")
-
-    assert backbone.spec == SPEC
-    assert t.equal(backbone.projection.weight, objective.backbone.projection.weight)
 
 
 def test_top_k_recall_counts_positives_inside_the_top_k():

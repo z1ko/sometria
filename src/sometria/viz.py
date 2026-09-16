@@ -4,7 +4,7 @@ Every function returns a :class:`~matplotlib.figure.Figure` and draws nothing, s
 notebook displays it and a script saves it without either knowing about the other.
 
 Two things are worth knowing before reading a reconstruction plot. The loss runs on
-:func:`~sometria.models.window.standardize_tokens` output -- zero mean and unit variance
+:func:`standardize_tokens` output -- zero mean and unit variance
 *per token* -- so the model never predicts a patch's magnitude, only its shape, and a
 "true vs predicted" overlay in raw joint angles would be showing scale the model was
 never asked for. Everything here therefore plots error in standardized space. And a
@@ -28,12 +28,24 @@ import polars as pl
 import torch as t
 
 from matplotlib.figure import Figure
-from omegaconf import OmegaConf
 from torchmetrics.classification import MultilabelAveragePrecision
 
 from sometria.catalog import load_label_vocabulary
-from sometria.models.window import standardize_tokens
-from sometria.train import build
+
+
+
+def standardize_tokens(target: t.Tensor, eps: float = 1.0e-6) -> t.Tensor:
+    """Zero mean and unit variance per token, over its own values.
+
+    Inlined from the pretraining stack this repo used to carry, because one figure below is
+    the only thing left that needs it: a reconstruction target is scored in this space, so
+    an error plot drawn against raw values would be reporting a different quantity than the
+    loss did.
+    """
+
+    mean = target.mean(dim=-1, keepdim=True)
+    var = target.var(dim=-1, keepdim=True)
+    return (target - mean) / (var + eps) ** 0.5
 
 
 def project_root(start: str | Path | None = None) -> Path:
@@ -74,57 +86,6 @@ def latest_checkpoint(run: str | Path) -> Path:
         if (version / "checkpoints" / "last.ckpt").exists():
             return version / "checkpoints" / "last.ckpt"
     raise FileNotFoundError(f"no checkpoint under {run}/lightning_logs/version_*/checkpoints")
-
-
-def load_run(run: str | Path, device: str | None = None) -> tuple[t.nn.Module, object]:
-    """``(model, datamodule)`` for a finished run, rebuilt from the config it saved.
-
-    The resolved config beside the run is what produced it, so this reconstructs the
-    experiment rather than a fresh guess at it -- including, for a probe, which
-    pretraining checkpoint its backbone came from. Weights are then loaded over the top.
-
-    ``device`` defaults to CUDA when there is one. Nothing here runs a Lightning
-    ``Trainer``, so no accelerator moves the model on anyone's behalf, and a checkpoint
-    loads to CPU by default -- forgetting this does not fail, it just runs the encoder on
-    the CPU at a fraction of the speed.
-
-    The datamodule is returned set up and with ``num_workers`` forced to 0: a notebook
-    kernel and a forked loader do not survive each other.
-    """
-
-    device = device or ("cuda" if t.cuda.is_available() else "cpu")
-
-    run = Path(run)
-    config = OmegaConf.load(run / "config.yaml")
-    OmegaConf.update(config, "dataloader.num_workers", 0)
-
-    # A probe's own checkpoint holds its backbone -- the module is registered, only the
-    # constructor argument was excluded from the hyperparameters -- so the pretraining
-    # checkpoint it names is not needed here, and depending on it would make a figure
-    # impossible whenever that file has been moved or deleted. The `encoder:` block still
-    # has to describe the same architecture, which the strict load below verifies.
-    if config.model.get("name") == "classifier":
-        OmegaConf.update(config, "model.checkpoint", None)
-
-    model, datamodule = build(config)
-    state = t.load(latest_checkpoint(run), map_location="cpu")
-
-    # Buffers may be absent from a checkpoint older than the buffer -- `loss_channel_index`
-    # is one -- and they are derived from the hyperparameters the constructor already read,
-    # so the rebuilt model has the right ones. Missing *parameters* are a different story
-    # and still an error, which is what the assertion below separates.
-    missing, unexpected = model.load_state_dict(state["state_dict"], strict=False)
-    buffers = {name for name, _ in model.named_buffers()}
-    if set(missing) - buffers or unexpected:
-        raise RuntimeError(
-            f"{run} does not fit its own config: "
-            f"missing {sorted(set(missing) - buffers)}, unexpected {sorted(unexpected)}"
-        )
-    model.eval()
-    model.to(device)
-
-    datamodule.setup("fit")
-    return model, datamodule
 
 
 def dof_names(datamodule) -> tuple[str, ...] | None:

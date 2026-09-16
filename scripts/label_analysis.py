@@ -30,27 +30,20 @@ Two things the numbers depend on:
 """
 
 import argparse
-import re
-import sys
 from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-import torch as t
 
 from matplotlib.figure import Figure
-from omegaconf import OmegaConf
+
+import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from moments_baseline import collect as collect_moments  # noqa: E402
-from moments_baseline import train_head  # noqa: E402
-
-from sometria.catalog import load_annotations, load_label_vocabulary
-from sometria.downstream.dataset import LabelledMotionDataModule
-from sometria.viz import collect_predictions, label_names, load_run, per_label_ap
+from sometria.catalog import load_annotations, load_label_vocabulary  # noqa: E402
 
 #: Arms scored against each other. The key is the legend label and the order is the
 #: categorical slot order, so it must not be shuffled between figures -- colour follows
@@ -103,6 +96,8 @@ def _style(axes, *, grid_axis: str = "y") -> None:
 
 
 # --------------------------------------------------------------------------- collection
+
+
 
 
 def window_coverage(num_labels: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -186,74 +181,24 @@ def window_coverage(num_labels: int) -> tuple[np.ndarray, np.ndarray, np.ndarray
     return mean_coverage, positives, sequence_share
 
 
-def moments_arm(config, num_labels: int, device: str, passes: int = 4) -> t.Tensor:
-    """Per-label AP for a linear head over the four moments, on the probe's own config."""
-
-    OmegaConf.update(config, "dataloader.num_workers", 4)
-    data = LabelledMotionDataModule(config)
-    data.setup("fit")
-
-    train_x, _, train_y = collect_moments(data.train_dataloader(), passes, None)
-    val_x, _, val_y = collect_moments(data.val_dataloader(), 1, None)
-    head = train_head(
-        (train_x, train_y), num_labels, epochs=40, batch_size=256, lr=1e-3, device=device
-    )
-    with t.no_grad():
-        return per_label_ap(head(val_x.to(device)).cpu(), val_y)
-
-
-def statistics_ceiling(report: str | Path = KNN_REPORT) -> dict[str, float]:
-    """``{source: macro_map}`` at the largest k in a ``scripts/knn_probe.py`` report.
-
-    The kNN rows are the strongest statistics-only number available and the only place
-    the random-init control is recorded, so the ladder reads them rather than restating
-    them by hand.
-    """
-
-    rows = {}
-    for line in Path(report).read_text().splitlines():
-        match = re.match(r"\s+(\S+(?: \S+)*?) k=(\d+)\s+([\d.]+)", line)
-        if match:
-            rows.setdefault(match.group(1), {})[int(match.group(2))] = float(match.group(3))
-    return {source: values[max(values)] for source, values in rows.items()}
-
-
 def build_cache(cache: Path = CACHE, *, force: bool = False, passes: int = 4) -> dict:
-    """Collect every arm's per-label AP and the label statistics, or load the cache."""
+    """Every arm's per-label AP and the label statistics, read back from the cache."""
 
     if cache.exists() and not force:
         return dict(np.load(cache, allow_pickle=True))
 
-    t.manual_seed(13)
-    device = "cuda" if t.cuda.is_available() else "cpu"
-    names = label_names(ROOT, LABEL_SET)
-
-    arms = {}
-    for name, run in RUNS.items():
-        model, data = load_run(run)
-        model.eval()
-        with t.no_grad():
-            logits, targets = collect_predictions(model, data.val_dataloader())
-        arms[name] = per_label_ap(logits, targets).numpy()
-        print(f"  {name:<10} macro mAP {np.nanmean(arms[name]):.4f}")
-        del model, data
-
-    config = OmegaConf.load(f"{RUNS['probe']}/config.yaml")
-    arms["moments"] = moments_arm(config, len(names), device, passes).numpy()
-    print(f"  {'moments':<10} macro mAP {np.nanmean(arms['moments']):.4f}")
-
-    mean_coverage, positives, sequence_share = window_coverage(len(names))
-    data = {
-        **arms,
-        "names": np.array(names),
-        "mean_coverage": mean_coverage,
-        "positives": positives,
-        "sequence_share": sequence_share,
-        "knn": np.array([statistics_ceiling()], dtype=object),
-    }
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(cache, **data)
-    return data
+    # Collection is gone, and `RUNS` above is kept as the record of what produced the cache
+    # rather than as something still runnable. Both of those runs were written by a
+    # pretraining stack this repo no longer carries -- see the commit that removed
+    # `sometria.train` -- and neither directory survives. Recollecting would mean
+    # retraining both arms under the current objectives first, at which point the figures
+    # are describing a different experiment and the cache should be rebuilt deliberately.
+    raise FileNotFoundError(
+        f"{cache} is missing and cannot be rebuilt: the runs it was collected from "
+        f"({', '.join(RUNS.values())}) no longer exist, and the stack that trained them "
+        "has been removed. Restore the cache from git, or retrain the arms and write a "
+        "new collector against scripts/probe_baseline_mae.py:load_pretrained."
+    )
 
 
 def label_frame(data: dict) -> pl.DataFrame:
