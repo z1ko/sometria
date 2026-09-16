@@ -1,6 +1,7 @@
 # MAE baseline, at the reference's hyperparameters
 # (Mao et al., https://github.com/maoyunyao/MAMP, config/ntu60_xsub_joint/pretrain_mae_*).
-# Its only differences from experiment_mamp.yaml are `masking.tau` and `model.target`.
+# The default BASE for scripts/pretrain_matrix.sh. `config/mae/<arch>.yaml` overlays the
+# encoder dimensions on top, and `config/dataloader/<corpus>.yaml` the normalization.
 
 dataloader:
   root: data/processed
