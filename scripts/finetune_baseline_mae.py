@@ -37,7 +37,7 @@ from pathlib import Path
 
 import lightning as L
 import torch as t
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 from omegaconf import OmegaConf
 
@@ -105,13 +105,28 @@ def finetune(config, checkpoint: Path, output: Path) -> dict:
 
     datamodule = LabelledMotionDataModule(config)
     monitor = config.training.get("monitor", "val/macro_map")
+    mode = "min" if monitor.endswith("loss") else "max"
 
-    best = ModelCheckpoint(
-        monitor=monitor,
-        mode="min" if monitor.endswith("loss") else "max",
-        save_top_k=1,
-        save_last=False,
-    )
+    best = ModelCheckpoint(monitor=monitor, mode=mode, save_top_k=1, save_last=False)
+    callbacks = [
+        LearningRateMonitor(logging_interval="step"),
+        best,
+        ModelCheckpoint(save_top_k=1, save_last=True, filename="latest"),
+    ]
+
+    # Off unless `training.patience` is set, and off in every config on disk. Every
+    # fine-tune already written ran its full budget, so a patience that silently truncated
+    # some of them would make runs incomparable with nothing in metrics.json saying which
+    # was which -- `epochs_run` below is what says it.
+    #
+    # Patience counts validation checks without improvement, which is epochs here because
+    # validation runs once per epoch. It stops a *diverging* run for free as well as a
+    # merely finished one: EarlyStopping defaults to check_finite=True, so a NaN monitor
+    # ends the run rather than burning the rest of the budget on a dead model.
+    patience = config.training.get("patience")
+    if patience:
+        callbacks.append(EarlyStopping(monitor=monitor, mode=mode, patience=int(patience)))
+
     trainer = L.Trainer(
         accelerator="auto",
         precision=config.training.get("precision", "bf16-mixed"),
@@ -121,11 +136,7 @@ def finetune(config, checkpoint: Path, output: Path) -> dict:
         limit_train_batches=config.training.get("limit_train_batches", None),
         limit_val_batches=config.training.get("limit_val_batches", None),
         overfit_batches=config.training.get("overfit_batches", 0),
-        callbacks=[
-            LearningRateMonitor(logging_interval="step"),
-            best,
-            ModelCheckpoint(save_top_k=1, save_last=True, filename="latest"),
-        ],
+        callbacks=callbacks,
         logger=CSVLogger(save_dir=output),
     )
     trainer.fit(model, datamodule=datamodule)
@@ -143,6 +154,10 @@ def finetune(config, checkpoint: Path, output: Path) -> dict:
         if best.best_model_path
         else None,
         "epochs": config.training.epochs,
+        # The budget above is what was asked for; this is what ran. They differ exactly when
+        # early stopping fired, and a cell that stopped at 31 of 100 is not the same
+        # measurement as one that ran 100 -- the tables have to be able to tell.
+        "epochs_run": trainer.current_epoch,
         "lr": config.model.get("lr", 1e-3),
         "layer_decay": config.model.get("layer_decay"),
         "backbone_lr": config.model.get("backbone_lr", 1e-4),

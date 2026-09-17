@@ -118,8 +118,16 @@ for config in "$BASE" "$DATALOADER" "$SIZE"; do
     exit 1
 done
 
-names=(p pk pkd)
-channels=("[0,1]" "[0,1,2,3]" "[0,1,2,3,4]")
+# Nested, narrowest first, so every rung contains the one before it and a step on either
+# axis only ever *adds* channels. `pv` splits what `pk` bundles: the whole loss-axis gain
+# measured so far lands in the single p->pk step, which adds velocity and acceleration
+# together, so nothing on disk says which of the two bought it.
+#
+# Note the letters stop being categories here. p/k/d read as pose/kinematics/dynamics, and
+# `pv` is half of k -- named for the channel rather than the category because "pose plus
+# velocity" has no category name in that scheme.
+names=(p pv pk pkd)
+channels=("[0,1]" "[0,1,2]" "[0,1,2,3]" "[0,1,2,3,4]")
 
 # Those indices are positions in the 5-channel OpenSim stack (sin, cos, vel, acc, tau). A
 # corpus that declares its own channels has a different layout and they do not transfer:

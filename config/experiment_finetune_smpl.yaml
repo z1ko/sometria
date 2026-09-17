@@ -1,0 +1,68 @@
+# The SMPL arm's BABEL-60 finetune: experiment_finetune.yaml against the SMPL corpus.
+# Stands beside it for the same reason experiment_linear_probe_smpl.yaml stands beside the
+# probe config: scripts/finetune_baseline_mae.py takes one --config, and the four things
+# that differ are the corpus, not the benchmark -- the joint definition, the statistics the
+# backbone pretrained under, which takes the split holds, and the from-scratch encoder's
+# input shape. Head, pooling, label set, coverage rule and the whole optimizer recipe are
+# untouched, because those are what has to stay equal for the two arms to be comparable.
+#
+# scripts/finetune_matrix.sh cannot drive this arm: the SMPL pretraining runs have no cell
+# subdirectory (goodnight.sh writes the run at the seed root, since the p/pk/pkd ladder
+# does not describe an 18-channel layout), so its `in_*` glob matches nothing. Call
+# finetune_baseline_mae.py directly -- see the smpl_run function in goodnight.sh.
+
+dataloader:
+  root: data/processed
+  human: config/smpl.yaml
+  normalization: stats/smpl_rot6d_log_vel_acc_v1/pretrain_paired_v1_train_clean.pt
+  # 128 as in experiment_finetune.yaml rather than the probe's 32: the optimizer recipe is
+  # part of what is held equal across the arms, and 21 joints is the cheaper side anyway.
+  batch_size: 128
+  num_workers: 4
+  window_frames: 240
+  label_set: babel_action_60
+  label_min_coverage: 0.15
+
+  train:
+    split_set: babel_paired
+    split: train
+    source_datasets: ["AMASS-SMPL"]
+
+  val:
+    split_set: babel_paired
+    split: val
+    source_datasets: ["AMASS-SMPL"]
+
+# Only read when `model.checkpoint` is null: a pretrained backbone brings its own spec in
+# the checkpoint's hparams. Keep it matching the pretraining config anyway, or the
+# random-initialization control stops being the same architecture as what it controls for.
+encoder:
+  num_dofs: 21
+  num_features: 18
+  patch_size: 8
+  window_frames: 240
+  d_model: 256
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+model:
+  name: finetune
+  checkpoint: null
+  encoder: teacher
+  pool: attentive
+  lr: 0.001
+  layer_decay: 0.75      # overridden on the command line, same as the clean arm
+  backbone_lr: 0.00001
+  weight_decay: 0.05
+  min_lr_frac: 0.0
+  warmup: 0.05
+
+training:
+  seed: 13
+  epochs: 100
+  monitor: val/macro_map
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  overfit_batches: 0

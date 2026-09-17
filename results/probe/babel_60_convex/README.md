@@ -42,81 +42,90 @@ uv run python results/probe/babel_60_convex/gen.py
 
 ### `amass_clean` / medium_100ep (4 seeds)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | 0.3446 ±0.0035 (-6.1%) | 0.3622 ±0.0031 (-1.3%) | 0.3622 ±0.0021 (-1.3%) |
-| **pk** | 0.3505 ±0.0046 (-4.5%) | 0.3658 ±0.0029 (-0.3%) | **0.3671** ±0.0027 (+0.0%) |
-| **pkd** | 0.3487 ±0.0031 (-5.0%) | 0.3581 ±0.0021 (-2.4%) | 0.3618 ±0.0039 (-1.4%) |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | 0.3446 ±0.0035 (-6.1%) | -- | 0.3622 ±0.0031 (-1.3%) | 0.3622 ±0.0021 (-1.3%) |
+| **pv** | -- | -- | -- | -- |
+| **pk** | 0.3505 ±0.0046 (-4.5%) | -- | 0.3658 ±0.0029 (-0.3%) | **0.3671** ±0.0027 (+0.0%) |
+| **pkd** | 0.3487 ±0.0031 (-5.0%) | -- | 0.3581 ±0.0021 (-2.4%) | 0.3618 ±0.0039 (-1.4%) |
 
 ### `amass_clean` / medium_100ep_jepa (3 seeds, input axis only)
 
 | Input | Macro mAP |
 | :--- | :---: |
 | **p** | 0.3068 ±0.0194 (-9.7%) |
+| **pv** | -- |
 | **pk** | 0.3134 ±0.0225 (-7.8%) |
 | **pkd** | **0.3398** ±0.0132 (+0.0%) |
 
 ### `amass_clean` / medium_100ep_simmim (2 seeds)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | 0.1751 ±0.0384 (-42.3%) | 0.2575 ±0.0005 (-15.1%) | 0.2510 ±0.0108 (-17.3%) |
-| **pk** | 0.1426 ±0.0061 (-53.0%) | 0.2293 ±0.0220 (-24.4%) | **0.3034** ±0.0010 (+0.0%) |
-| **pkd** | 0.1240 ±0.0201 (-59.1%) | 0.2362 ±0.0157 (-22.1%) | 0.2665 ±0.0059 (-12.2%) |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | 0.1751 ±0.0384 (-42.3%) | -- | 0.2575 ±0.0005 (-15.1%) | 0.2510 ±0.0108 (-17.3%) |
+| **pv** | -- | -- | -- | -- |
+| **pk** | 0.1426 ±0.0061 (-53.0%) | -- | 0.2293 ±0.0220 (-24.4%) | **0.3034** ±0.0010 (+0.0%) |
+| **pkd** | 0.1240 ±0.0201 (-59.1%) | -- | 0.2362 ±0.0157 (-22.1%) | 0.2665 ±0.0059 (-12.2%) |
 
 ### `amass_smpl` / medium_100ep (3 seeds)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | **0.3450** ±0.0044 (+0.0%) | -- | -- |
-| **pk** | -- | -- | -- |
-| **pkd** | -- | -- | -- |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | **0.3450** ±0.0044 (+0.0%) | -- | -- | -- |
+| **pv** | -- | -- | -- | -- |
+| **pk** | -- | -- | -- | -- |
+| **pkd** | -- | -- | -- | -- |
 
 ### `amass_smpl` / medium_100ep_jepa (2 seeds, input axis only)
 
 | Input | Macro mAP |
 | :--- | :---: |
 | **p** | **0.3150** ±0.0010 (+0.0%) |
+| **pv** | -- |
 | **pk** | -- |
 | **pkd** | -- |
 
 ### `amass_smpl` / medium_100ep_simmim (2 seeds)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | **0.2647** ±0.0018 (+0.0%) | -- | -- |
-| **pk** | -- | -- | -- |
-| **pkd** | -- | -- | -- |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | **0.2647** ±0.0018 (+0.0%) | -- | -- | -- |
+| **pv** | -- | -- | -- | -- |
+| **pk** | -- | -- | -- | -- |
+| **pkd** | -- | -- | -- | -- |
 
 ### Delta, `amass_smpl` − `amass_clean` (medium_100ep)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | +0.0003 (+0.1σ) | -- | -- |
-| **pk** | -- | -- | -- |
-| **pkd** | -- | -- | -- |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | +0.0003 (+0.1σ) | -- | -- | -- |
+| **pv** | -- | -- | -- | -- |
+| **pk** | -- | -- | -- | -- |
+| **pkd** | -- | -- | -- | -- |
 
-*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0031 is the seed spread pooled over cells; with n = 4 vs 3 runs the difference of two means has SE = 0.0024, so 1σ here = 0.0024 Macro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 9-cell matrix and picking the largest needs |z| > 2.77 to keep the same 5% false-positive rate over the table.*
+*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0031 is the seed spread pooled over cells; with n = 4 vs 3 runs the difference of two means has SE = 0.0024, so 1σ here = 0.0024 Macro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 16-cell matrix and picking the largest needs |z| > 2.96 to keep the same 5% false-positive rate over the table.*
 
 ### Delta, `amass_smpl` − `amass_clean` (medium_100ep_jepa)
 
 | Input \ Loss | -- |
 | :--- | :---: |
 | **p** | +0.0082 (+0.5σ) |
+| **pv** | -- |
 | **pk** | -- |
 | **pkd** | -- |
 
-*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0184 is the seed spread pooled over cells; with n = 3 vs 2 runs the difference of two means has SE = 0.0168, so 1σ here = 0.0168 Macro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 3-cell matrix and picking the largest needs |z| > 2.39 to keep the same 5% false-positive rate over the table.*
+*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0184 is the seed spread pooled over cells; with n = 3 vs 2 runs the difference of two means has SE = 0.0168, so 1σ here = 0.0168 Macro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 4-cell matrix and picking the largest needs |z| > 2.50 to keep the same 5% false-positive rate over the table.*
 
 ### Delta, `amass_smpl` − `amass_clean` (medium_100ep_simmim)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | +0.0895 (+6.7σ) | -- | -- |
-| **pk** | -- | -- | -- |
-| **pkd** | -- | -- | -- |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | +0.0895 (+6.7σ) | -- | -- | -- |
+| **pv** | -- | -- | -- | -- |
+| **pk** | -- | -- | -- | -- |
+| **pkd** | -- | -- | -- | -- |
 
-*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0134 is the seed spread pooled over cells; with n = 2 vs 2 runs the difference of two means has SE = 0.0134, so 1σ here = 0.0134 Macro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 9-cell matrix and picking the largest needs |z| > 2.77 to keep the same 5% false-positive rate over the table.*
+*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0134 is the seed spread pooled over cells; with n = 2 vs 2 runs the difference of two means has SE = 0.0134, so 1σ here = 0.0134 Macro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 16-cell matrix and picking the largest needs |z| > 2.96 to keep the same 5% false-positive rate over the table.*
 
 ## Micro mAP
 
@@ -134,81 +143,90 @@ uv run python results/probe/babel_60_convex/gen.py
 
 ### `amass_clean` / medium_100ep (4 seeds)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | 0.5303 ±0.0026 (-4.8%) | 0.5512 ±0.0033 (-1.1%) | 0.5501 ±0.0016 (-1.3%) |
-| **pk** | 0.5426 ±0.0033 (-2.6%) | 0.5532 ±0.0017 (-0.7%) | **0.5571** ±0.0045 (+0.0%) |
-| **pkd** | 0.5406 ±0.0034 (-3.0%) | 0.5506 ±0.0013 (-1.2%) | 0.5505 ±0.0012 (-1.2%) |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | 0.5303 ±0.0026 (-4.8%) | -- | 0.5512 ±0.0033 (-1.1%) | 0.5501 ±0.0016 (-1.3%) |
+| **pv** | -- | -- | -- | -- |
+| **pk** | 0.5426 ±0.0033 (-2.6%) | -- | 0.5532 ±0.0017 (-0.7%) | **0.5571** ±0.0045 (+0.0%) |
+| **pkd** | 0.5406 ±0.0034 (-3.0%) | -- | 0.5506 ±0.0013 (-1.2%) | 0.5505 ±0.0012 (-1.2%) |
 
 ### `amass_clean` / medium_100ep_jepa (3 seeds, input axis only)
 
 | Input | Micro mAP |
 | :--- | :---: |
 | **p** | 0.4868 ±0.0222 (-8.6%) |
+| **pv** | -- |
 | **pk** | 0.5059 ±0.0240 (-5.0%) |
 | **pkd** | **0.5326** ±0.0105 (+0.0%) |
 
 ### `amass_clean` / medium_100ep_simmim (2 seeds)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | 0.3842 ±0.0314 (-22.6%) | 0.4578 ±0.0052 (-7.8%) | 0.4555 ±0.0053 (-8.2%) |
-| **pk** | 0.3554 ±0.0139 (-28.4%) | 0.4374 ±0.0196 (-11.9%) | **0.4964** ±0.0006 (+0.0%) |
-| **pkd** | 0.3240 ±0.0324 (-34.7%) | 0.4416 ±0.0142 (-11.0%) | 0.4719 ±0.0068 (-4.9%) |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | 0.3842 ±0.0314 (-22.6%) | -- | 0.4578 ±0.0052 (-7.8%) | 0.4555 ±0.0053 (-8.2%) |
+| **pv** | -- | -- | -- | -- |
+| **pk** | 0.3554 ±0.0139 (-28.4%) | -- | 0.4374 ±0.0196 (-11.9%) | **0.4964** ±0.0006 (+0.0%) |
+| **pkd** | 0.3240 ±0.0324 (-34.7%) | -- | 0.4416 ±0.0142 (-11.0%) | 0.4719 ±0.0068 (-4.9%) |
 
 ### `amass_smpl` / medium_100ep (3 seeds)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | **0.5255** ±0.0061 (+0.0%) | -- | -- |
-| **pk** | -- | -- | -- |
-| **pkd** | -- | -- | -- |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | **0.5255** ±0.0061 (+0.0%) | -- | -- | -- |
+| **pv** | -- | -- | -- | -- |
+| **pk** | -- | -- | -- | -- |
+| **pkd** | -- | -- | -- | -- |
 
 ### `amass_smpl` / medium_100ep_jepa (2 seeds, input axis only)
 
 | Input | Micro mAP |
 | :--- | :---: |
 | **p** | **0.4886** ±0.0040 (+0.0%) |
+| **pv** | -- |
 | **pk** | -- |
 | **pkd** | -- |
 
 ### `amass_smpl` / medium_100ep_simmim (2 seeds)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | **0.4637** ±0.0044 (+0.0%) | -- | -- |
-| **pk** | -- | -- | -- |
-| **pkd** | -- | -- | -- |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | **0.4637** ±0.0044 (+0.0%) | -- | -- | -- |
+| **pv** | -- | -- | -- | -- |
+| **pk** | -- | -- | -- | -- |
+| **pkd** | -- | -- | -- | -- |
 
 ### Delta, `amass_smpl` − `amass_clean` (medium_100ep)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | -0.0049 (-2.5σ) | -- | -- |
-| **pk** | -- | -- | -- |
-| **pkd** | -- | -- | -- |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | -0.0049 (-2.5σ) | -- | -- | -- |
+| **pv** | -- | -- | -- | -- |
+| **pk** | -- | -- | -- | -- |
+| **pkd** | -- | -- | -- | -- |
 
-*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0025 is the seed spread pooled over cells; with n = 4 vs 3 runs the difference of two means has SE = 0.0019, so 1σ here = 0.0019 Micro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 9-cell matrix and picking the largest needs |z| > 2.77 to keep the same 5% false-positive rate over the table.*
+*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0025 is the seed spread pooled over cells; with n = 4 vs 3 runs the difference of two means has SE = 0.0019, so 1σ here = 0.0019 Micro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 16-cell matrix and picking the largest needs |z| > 2.96 to keep the same 5% false-positive rate over the table.*
 
 ### Delta, `amass_smpl` − `amass_clean` (medium_100ep_jepa)
 
 | Input \ Loss | -- |
 | :--- | :---: |
 | **p** | +0.0018 (+0.1σ) |
+| **pv** | -- |
 | **pk** | -- |
 | **pkd** | -- |
 
-*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0189 is the seed spread pooled over cells; with n = 3 vs 2 runs the difference of two means has SE = 0.0173, so 1σ here = 0.0173 Micro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 3-cell matrix and picking the largest needs |z| > 2.39 to keep the same 5% false-positive rate over the table.*
+*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0189 is the seed spread pooled over cells; with n = 3 vs 2 runs the difference of two means has SE = 0.0173, so 1σ here = 0.0173 Micro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 4-cell matrix and picking the largest needs |z| > 2.50 to keep the same 5% false-positive rate over the table.*
 
 ### Delta, `amass_smpl` − `amass_clean` (medium_100ep_simmim)
 
-| Input \ Loss | p | pk | pkd |
-| :--- | :---: | :---: | :---: |
-| **p** | +0.0795 (+5.5σ) | -- | -- |
-| **pk** | -- | -- | -- |
-| **pkd** | -- | -- | -- |
+| Input \ Loss | p | pv | pk | pkd |
+| :--- | :---: | :---: | :---: | :---: |
+| **p** | +0.0795 (+5.5σ) | -- | -- | -- |
+| **pv** | -- | -- | -- | -- |
+| **pk** | -- | -- | -- | -- |
+| **pkd** | -- | -- | -- | -- |
 
-*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0144 is the seed spread pooled over cells; with n = 2 vs 2 runs the difference of two means has SE = 0.0144, so 1σ here = 0.0144 Micro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 9-cell matrix and picking the largest needs |z| > 2.77 to keep the same 5% false-positive rate over the table.*
+*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many standard errors of the difference the delta is, not how many seed sd's. σ = 0.0144 is the seed spread pooled over cells; with n = 2 vs 2 runs the difference of two means has SE = 0.0144, so 1σ here = 0.0144 Micro mAP. |z| > 2 is marginal (p < 0.05 for one pre-chosen cell); reading the whole 16-cell matrix and picking the largest needs |z| > 2.96 to keep the same 5% false-positive rate over the table.*
 
 ## Can the cells be ranked?
 
@@ -222,37 +240,37 @@ uv run python results/probe/babel_60_convex/gen.py
 
 ## Marginal level of each axis
 
-| corpus | arch | axis | `p` | `pk` | `pkd` |
-| :--- | :--- | :--- | ---: | ---: | ---: |
-| amass_clean | medium_100ep | input | 0.3564 | 0.3611 | 0.3562 |
-| amass_clean | medium_100ep | loss | 0.3480 | 0.3621 | 0.3637 |
-| amass_clean | medium_100ep_jepa | input | 0.3068 | 0.3134 | 0.3398 |
-| amass_clean | medium_100ep_simmim | input | 0.2279 | 0.2251 | 0.2089 |
-| amass_clean | medium_100ep_simmim | loss | 0.1473 | 0.2410 | 0.2736 |
-| amass_smpl | medium_100ep | input | 0.3450 | -- | -- |
-| amass_smpl | medium_100ep | loss | 0.3450 | -- | -- |
-| amass_smpl | medium_100ep_jepa | input | 0.3150 | -- | -- |
-| amass_smpl | medium_100ep_simmim | input | 0.2647 | -- | -- |
-| amass_smpl | medium_100ep_simmim | loss | 0.2647 | -- | -- |
+| corpus | arch | axis | `p` | `pv` | `pk` | `pkd` |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: |
+| amass_clean | medium_100ep | input | 0.3564 | -- | 0.3611 | 0.3562 |
+| amass_clean | medium_100ep | loss | 0.3480 | -- | 0.3621 | 0.3637 |
+| amass_clean | medium_100ep_jepa | input | 0.3068 | -- | 0.3134 | 0.3398 |
+| amass_clean | medium_100ep_simmim | input | 0.2279 | -- | 0.2251 | 0.2089 |
+| amass_clean | medium_100ep_simmim | loss | 0.1473 | -- | 0.2410 | 0.2736 |
+| amass_smpl | medium_100ep | input | 0.3450 | -- | -- | -- |
+| amass_smpl | medium_100ep | loss | 0.3450 | -- | -- | -- |
+| amass_smpl | medium_100ep_jepa | input | 0.3150 | -- | -- | -- |
+| amass_smpl | medium_100ep_simmim | input | 0.2647 | -- | -- | -- |
+| amass_smpl | medium_100ep_simmim | loss | 0.2647 | -- | -- | -- |
 
 *Each value averages over the other axis. Levels only -- whether a difference between them is real is the next table.*
 
 ## Where along the ladder the gain appears
 
-| corpus | arch | axis | `p`→`pk` | `pk`→`pkd` | total `p`→`pkd` |
-| :--- | :--- | :--- | ---: | ---: | ---: |
-| amass_clean | medium_100ep | input | +0.0048 (0.052) | -0.0049 (0.007) | -0.0001 (0.919) |
-| amass_clean | medium_100ep | loss | +0.0141 (0.002) | +0.0016 (0.208) | +0.0157 (0.004) |
-| amass_clean | medium_100ep_jepa | input | +0.0066 (0.785) | +0.0264 (0.059) | +0.0330 (0.150) |
-| amass_clean | medium_100ep_simmim | input | -0.0028 (0.781) | -0.0162 (0.381) | -0.0190 (0.497) |
-| amass_clean | medium_100ep_simmim | loss | +0.0938 (0.009) | +0.0326 (0.050) | +0.1264 (0.007) |
-| amass_smpl | medium_100ep | input | -- | -- | -- |
-| amass_smpl | medium_100ep | loss | -- | -- | -- |
-| amass_smpl | medium_100ep_jepa | input | -- | -- | -- |
-| amass_smpl | medium_100ep_simmim | input | -- | -- | -- |
-| amass_smpl | medium_100ep_simmim | loss | -- | -- | -- |
+| corpus | arch | axis | `p`→`pv` | `pv`→`pk` | `pk`→`pkd` | total `p`→`pkd` |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: |
+| amass_clean | medium_100ep | input | -- | -- | -0.0049 (0.007) | -0.0001 (0.919) |
+| amass_clean | medium_100ep | loss | -- | -- | +0.0016 (0.208) | +0.0157 (0.004) |
+| amass_clean | medium_100ep_jepa | input | -- | -- | +0.0264 (0.059) | +0.0330 (0.150) |
+| amass_clean | medium_100ep_simmim | input | -- | -- | -0.0162 (0.381) | -0.0190 (0.497) |
+| amass_clean | medium_100ep_simmim | loss | -- | -- | +0.0326 (0.050) | +0.1264 (0.007) |
+| amass_smpl | medium_100ep | input | -- | -- | -- | -- |
+| amass_smpl | medium_100ep | loss | -- | -- | -- | -- |
+| amass_smpl | medium_100ep_jepa | input | -- | -- | -- | -- |
+| amass_smpl | medium_100ep_simmim | input | -- | -- | -- | -- |
+| amass_smpl | medium_100ep_simmim | loss | -- | -- | -- | -- |
 
-*Paired step to the next rung, signed so positive means widening helped. Cells share a seed and seed spread is several times these effects, so each step is paired on replicate (n = 4) rather than compared as independent means. Parenthesis is the two-sided paired p; bold is significant at 0.05 Bonferroni-corrected over the 30 steps and totals shown. At three replicates a p rests on two degrees of freedom -- read direction and magnitude before decisions.*
+*Paired step to the next rung, signed so positive means widening helped. Cells share a seed and seed spread is several times these effects, so each step is paired on replicate (n = 4) rather than compared as independent means. Parenthesis is the two-sided paired p; bold is significant at 0.05 Bonferroni-corrected over the 40 steps and totals shown. At three replicates a p rests on two degrees of freedom -- read direction and magnitude before decisions.*
 
 ## Best cell per corpus
 

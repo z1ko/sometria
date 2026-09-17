@@ -1,0 +1,8 @@
+{
+  "chance": {
+    "macro_map": 0.0421,
+    "micro_map": 0.0421,
+    "protocol": "exact, no model",
+    "note": "Average precision of a random ranking equals the class positive rate, so this is the mean per-class positive rate over the BABEL-60 validation windows. Computed from the annotations, so it is protocol-independent and applies to a fine-tune exactly as it does to a probe.\n\nThe probe report's other two baselines are deliberately absent. `moments` and `random encoder` are both frozen-readout numbers; a fine-tune trains the backbone, so neither is the same measurement and a dashed line would invite the comparison anyway."
+  }
+}
