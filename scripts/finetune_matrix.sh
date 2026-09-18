@@ -169,6 +169,15 @@ for seed in "${seeds[@]}"; do
             out="$out_root/$name"
             done_already "$out" && continue
 
+            # The pretraining `done` marker, not just the directory. Without this a cell
+            # still training is read at whatever checkpoint it has reached: JEPA
+            # seed3/in_p was probed at epoch 8 of 100 and scored 0.1037 against 0.285-0.323
+            # for its sibling seeds, then sat in the tables as a replicate. Loud, because a
+            # silent skip is how that went unnoticed in the first place.
+            if [ ! -e "$dir/done" ]; then
+                echo "UNFINISHED  $dir -- no done marker, skipping"
+                continue
+            fi
             echo "finetune  $name"
             # A repeat index doubles as the run seed. finetune_baseline_mae.py seeds from
             # training.seed, so without this every repeat would draw identical crops and an

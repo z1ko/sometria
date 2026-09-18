@@ -27,11 +27,26 @@ from torchmetrics.classification import MultilabelAveragePrecision, MultilabelF1
 _CONVEX_POOLS = {"mean", "mean_max", "moments"}
 
 # Log-spaced from 1e-1 (visibly over-regularized on the checkpoint matrix, macro mAP
-# ~0.20) down to 1e-6. Extends past where the matrix run's optimum landed (1e-5, still
-# improving at that grid's edge) so the default sweep finds the turnover instead of
-# quietly bottoming out at the last candidate.
+# ~0.20) down to 1e-9, so the sweep finds the turnover instead of quietly bottoming out at
+# the last candidate.
+#
+# The tail below 1e-6 is not speculative padding. At 1e-6 the grid turned over on all 46
+# MAE cells but on none of SimMIM's 34, and on 3 of JEPA's 10 -- and those three are
+# exactly the three anomalously low JEPA scores (0.270, 0.285, 0.289 against 0.31-0.35 for
+# every cell that did turn over). A censored cell reports the grid edge, not an optimum,
+# and the edge cells were still gaining +0.0035 (JEPA) to +0.0127 (SimMIM) per step, which
+# is the size of the effects these tables are read for.
+#
+# The pattern is what the objectives' features predict: SimMIM's are near rank-1, and
+# features carrying almost no variance need almost no shrinkage, so its optimum sits far
+# below where MAE's does. One grid has to cover all three.
+#
+# Results computed under the old grid are not comparable to results computed under this
+# one wherever the old sweep hit its edge -- MAE's are, since its argmax was interior
+# everywhere and a unimodal regularization path cannot move it by extending downward.
 DEFAULT_WEIGHT_DECAYS: tuple[float, ...] = (
     1e-1, 3e-2, 1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 3e-5, 1e-5, 3e-6, 1e-6,
+    3e-7, 1e-7, 3e-8, 1e-8, 3e-9, 1e-9,
 )
 
 # ponytail: LabelledWindows(tiles=False) draws one random crop per sample per epoch, so
