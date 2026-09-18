@@ -1,0 +1,11 @@
+mask,corpus,arch,replicate,cell,input,loss,epochs,dec_depth,dec_dim,degrees,zero_velocity,const_velocity
+suffix,amass_clean,medium_100ep,seed2,in_p__loss_p,p,p,40,1,64,4.9752068519592285,5.8182597160339355,13.559303283691406
+suffix,amass_clean,medium_100ep,seed2,in_p__loss_pk,p,pk,40,1,64,4.553149223327637,5.8182597160339355,13.559303283691406
+suffix,amass_clean,medium_100ep,seed2,in_p__loss_pkd,p,pkd,40,1,64,4.805945873260498,5.8182597160339355,13.559303283691406
+suffix,amass_clean,medium_100ep,seed2,in_pk__loss_p,pk,p,40,1,64,4.581767559051514,5.8182597160339355,13.559303283691406
+suffix,amass_clean,medium_100ep,seed2,in_pk__loss_pk,pk,pk,40,1,64,4.231293201446533,5.8182597160339355,13.559303283691406
+suffix,amass_clean,medium_100ep,seed2,in_pk__loss_pkd,pk,pkd,40,1,64,4.425187587738037,5.8182597160339355,13.559303283691406
+suffix,amass_clean,medium_100ep,seed2,in_pk__loss_pv,pk,pv,40,1,64,4.267293930053711,5.8182597160339355,13.559303283691406
+suffix,amass_clean,medium_100ep,seed2,in_pkd__loss_p,pkd,p,40,1,64,4.603216648101807,5.8182597160339355,13.559303283691406
+suffix,amass_clean,medium_100ep,seed2,in_pkd__loss_pk,pkd,pk,40,1,64,4.236181735992432,5.8182597160339355,13.559303283691406
+suffix,amass_clean,medium_100ep,seed2,in_pkd__loss_pkd,pkd,pkd,40,1,64,4.389508247375488,5.8182597160339355,13.559303283691406

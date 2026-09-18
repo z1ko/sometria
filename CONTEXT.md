@@ -128,9 +128,18 @@ context what encoder sees, target what decoder must predict. Disjoint,
 exhaustive, fixed-size once mask ratio chosen. Indices not binary
 mask, so loss gathers targets instead of multiplying across every token, and so
 mask can be plotted without instantiating a model.
+
+Produced by `baseline.random_mask` as a plain `(keep_idx, mask_idx)` tuple and gathered
+with `masking.gather_tokens`. `masking.MaskIndices` is the same pair as a dataclass with
+`context_of`/`targets_of` helpers -- written, imported by nothing.
 _Avoid_: visible/masked, keep/remove, unmasked
 
 **Motion-aware masking**:
+**Designed, not wired.** Nothing under `models/` calls it: all three objectives mask with
+`baseline.random_mask`, uniformly. No config carries a `masking:` block, so `tau` and
+`score_channels` cannot be set from YAML at all. What follows describes `masking.py` as
+written, kept because the code and the intent are real -- not because it runs.
+
 Choose targets in proportion to how much a patch moves, so informative parts of
 window are the ones held out. Score `|vel|` meaned over patch's frames — read
 through channel `Representation` names, never a literal index — turned into
@@ -140,30 +149,37 @@ toward uniform, `<= 0` plain random masking, which makes ablation baseline
 same function rather than second code path.
 
 Configured by `MaskSpec` — `mask_ratio`, `tau`, `score_channels` — validated once at
-construction, travelling in checkpoint hparams as plain fields, mapped from a YAML
-`masking:` block. Sits beside the backbone spec, not inside a **Pretext objective**:
-what gets held out is not what gets predicted, and both objectives mask the same way.
+construction, with `as_mask_spec` accepting a spec, its fields, or nothing. *Intended* to
+travel in checkpoint hparams as plain fields, mapped from a YAML `masking:` block, sitting
+beside the backbone spec rather than inside a **Pretext objective**. No `LightningModule`
+takes one today, and no YAML produces one.
 _Avoid_: importance sampling, saliency masking, hard mining
 
 **Masked window**:
-One window already split: its patches, its **Context** and **Target** indices, and its
-own time-patch count. Built once per
-step by `mask_window` and handed to whichever **Pretext objective** asked for it, which
-adds only what it predicts — patch values, their temporal difference, or the teacher's
-embedding. Holds no parameters and builds no module, so a window can be masked, checked
-and plotted with no backbone constructed. Lives in `models/window.py`, above
-`masking.py` (kept a leaf) and above `EncoderSpec`, which answers the questions about
-the token grid that need no built backbone.
+**Not built.** No `models/window.py`, no `mask_window`, no type bundling a window with its
+**Context** and **Target**. Each objective masks inline in its own `forward`:
+`random_mask` returns the index pair and the objective gathers what it needs. The bundling
+this entry once described is where the seam would go if a third objective wanted the same
+split; it is not one today, and nothing should be written as though it exists.
 _Avoid_: batch, masked input, masked sample
 
 **Backbone**:
-`nn.Module` that turns window into tokens and nothing else: patch projection,
-positional encoding, transformer blocks, final norm. Built from `EncoderSpec` — what a
-YAML `encoder:` block maps to, and what travels in checkpoint's hparams so classifier
-reloads without being told architecture twice. Every objective owns one (JEPA owns
-two, why "the encoder" not a usable name); no objective's decoder, mask token or
-prediction head belongs to it. Exposes `embed_tokens` (full grid), `embed` (pooled),
-`grid_shape`. Lives under `architecture/`, which holds no Lightning and no training.
+`nn.Module` that turns window into tokens and nothing else: patch projection, positional
+encoding, transformer blocks, final norm. Every objective owns one (JEPA owns two, why
+"the encoder" not a usable name); no objective's decoder, mask token or prediction head
+belongs to it.
+
+Two implementations, split by which side of project builds them, not yet unified:
+- `models/baseline.Encoder` — what every **Pretext objective** builds, from plain
+  constructor arguments, no spec.
+- `architecture/encoder.MotionTransformerEncoder` — what every **Protocol** and probe
+  builds, from `EncoderSpec`: what a YAML `encoder:` block maps to, and what travels in
+  checkpoint's hparams so a classifier reloads without being told architecture twice.
+  Exposes `embed_tokens` (full grid), `embed` (pooled), `grid_shape`. Lives under
+  `architecture/`, which holds no Lightning and no training.
+
+Bridge between them is `scripts/probe_baseline_mae.BaselineBackbone`, which wraps a
+loaded pretraining `MAE` in the interface downstream expects.
 _Avoid_: encoder, feature extractor, trunk
 
 **Student** and **Teacher**:
@@ -176,25 +192,30 @@ _Avoid_: online encoder, target encoder, momentum encoder
 **Predictor**:
 JEPA module that receives student context embeddings plus learned target slots and
 outputs vectors in the backbone embedding space at target indices. Same width and
-heads as the backbone, shallower depth only; no bottleneck projections, no decoder
-to patch values.
-_Avoid_: decoder, head, projection MLP
+heads as the backbone, shallower depth only; no bottleneck projections.
+
+Literally `baseline.Decoder`, reused — `self.predictor = Decoder(...)`, no separate class.
+Name kept anyway because what it emits is not patch values: its head lands in teacher's
+embedding space, which is the whole difference between JEPA and a reconstruction.
+_Avoid_: head, projection MLP
 
 **Pretext objective**:
 Self-supervised training task over a backbone: what hidden, what predicted, what
-loss is. One `LightningModule` per objective under `models/`, over a shared
-**Masked window**: masked reconstruction and JEPA today. Both subclass
-`PretextObjective`, which owns optimizer, schedule and steps -- a subclass says only
-`step(batch)`, returning loss plus whatever else it wants logged, and
-`trainable_parameters` if it holds something frozen. A **Protocol** deliberately
-stays outside: its optimizer runs two parameter groups at different rates on AdamW's own
-betas and decay, three knobs this base would carry for one call site. MAE and MAMP *not*
-separate objectives: one
-`MaskedMotionAutoencoder` at two configurations, differing in `tau` (uniform vs motion-aware
-masking) and `target` (reconstruct input vs predict its temporal difference). Both follow
-reference in taking motion target by differencing *the input the encoder sees*
-(`extract_motion`, over window not per patch), and in standardizing every target
-token before loss (`norm_targets`, reference's `norm_skes_loss`).
+loss is. One `LightningModule` per objective under `models/`: `baseline.MAE`, `simmim.SimMIM`,
+`jepa2.JEPA`.
+
+**No shared base class.** Each subclasses `L.LightningModule` directly and carries its own
+`training_step`, `validation_step` and `configure_optimizers`. There is no
+`PretextObjective`, no `step(batch)` contract and no `trainable_parameters` hook -- JEPA
+happens to have a `step` method, the other two do not. A **Protocol** stays outside for
+reasons that still hold: its optimizer runs two parameter groups at different rates on
+AdamW's own betas and decay.
+
+MAE and SimMIM are two classes, *not* one `MaskedMotionAutoencoder` at two configurations
+-- that class does not exist. MAE standardizes its target inline (`target_mean` and
+`target_var` in `baseline.py`), not through a shared `norm_targets`.
+`masking.extract_motion` is written and called by nothing under `models/`, so the
+temporal-difference objective the next paragraph reports on is not currently built.
 
 Tempting shortcut — select stored `vel` channel and call that the difference — was
 tried, does not work. That channel signed-log compressed and normalized per DOF, so its

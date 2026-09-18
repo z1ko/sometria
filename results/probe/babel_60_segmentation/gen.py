@@ -1,0 +1,1172 @@
+#!/usr/bin/env python
+"""Summarize the BABEL-60 segmentation probe's runs into metrics.csv and README.md.
+
+    uv run python results/probe/babel_60_segmentation/gen.py
+
+A copy of `results/probe/babel_60_convex/gen.py` with three constants changed -- METRICS,
+REPORTED and TITLES -- because everything else in that file is driven off them and the
+folder is designed to be copied. What differs is only *what* is tabulated: rows here are
+`(window, patch)` pairs, so the mAP is per time patch, and there is a second reported
+column that the window benchmark has no equivalent of.
+
+The benchmark is this script's own parent directory, so the paths follow the folder.
+
+Numbers are read, never transcribed. `results/loss_channels_ablation.md` is the argument
+for that: it is a hand-maintained narrative where metrics, run paths and normalization
+filenames were all copied in by hand, so provenance ended up embedded in prose ("with
+`pretrain_v1_train_clean.pt` normalization") where nothing can check it against the run.
+Here provenance is a CSV column read out of each run's own config.yaml.
+
+The prose in README.md is hand-written and survives regeneration; only the block between
+the GENERATED markers is replaced. Rankings and their explanations are judgment, tables
+are not.
+"""
+
+import json
+from pathlib import Path
+from statistics import NormalDist
+
+import matplotlib
+
+matplotlib.use("Agg")  # figures are written to disk, never shown
+
+import matplotlib.pyplot as plt
+import numpy as np
+import polars as pl
+from matplotlib.colors import LinearSegmentedColormap
+from omegaconf import OmegaConf
+from scipy import integrate, stats
+
+BENCHMARK = Path(__file__).resolve().parent.name
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[2]
+# The stage is read off the parent directory for the same reason BENCHMARK is read off this
+# one: `results/<stage>/<benchmark>/gen.py` mirrors `runs/<stage>/<benchmark>/`, so copying
+# this folder to `results/finetune/babel_60_finetune/` points it at the fine-tuning tree
+# with nothing edited. Hardcoding "probe" here was the one thing stopping that.
+STAGE = HERE.parent.name
+RUNS = ROOT / "runs" / STAGE / BENCHMARK
+
+# Corpora held out of the report for now. The runs stay where they are and metrics.json is
+# still read; this only decides what gets tabulated and plotted, so deleting a name here
+# brings that corpus back with one rerun. Named in the generated header so a reader of
+# README.md can see something was left out rather than assuming it was never run.
+EXCLUDE_CORPORA = {"amass_motionx_clean"}
+
+# The sweep axes, in width order rather than alphabetical, so a table reads narrow to wide.
+AXIS = ["p", "pv", "pk", "pkd"]
+
+# Everything metrics.json carries goes in the CSV -- it costs nothing and re-walking runs/
+# to recover a column later does.
+METRICS = [
+    "macro_map", "micro_map", "macro_f1s", "top_1_rec", "top_3_rec", "top_5_rec",
+    # Only a per-patch target has these. `boundary_best_threshold` is provenance rather
+    # than a score -- the cutoff `boundary_best_f1s` was maximized at -- and belongs in the
+    # CSV for the same reason `weight_decay` does: a swept number that moves the column
+    # beside it has to be readable next to it.
+    "boundary_f1s", "boundary_best_f1s", "boundary_best_threshold",
+]
+
+# What the README actually tabulates. The rest are excluded on measured grounds, not taste:
+#   top_{1,3,5}_rec  spread 2.9-3.6% across the matrix, the narrowest of any metric, and
+#                    rho 0.64-0.83 against macro mAP -- they mostly restate the ranking.
+#                    top-1 also caps near 0.33 on a ~3-label window by construction.
+#   macro_f1s        rho -0.672 (p=0.002) against the swept weight_decay, where every
+#                    ranking metric is flat (p>0.5). weight_decay scales the head's
+#                    weights, hence the logits, hence how many sigmoids clear the fixed
+#                    0.5 threshold -- and it is selected per cell on macro mAP. So this
+#                    column largely reports the regularization the sweep chose rather than
+#                    the representation, which is why it comes out anti-correlated with
+#                    every other metric.
+#
+# `micro_map` is dropped from the window benchmark's pair and `boundary_best_f1s` takes its
+# place. The two reported columns here are not two views of one ranking: macro mAP *is* the
+# ranking, and boundary F1 is the gate on it. A cell that beats the moments baseline on mAP
+# and not on boundary F1 has named the action without ever saying when, which is the one
+# thing this task was built to detect -- so it has to be in every table beside the number it
+# qualifies, not one section further down.
+#
+# Swept, not fixed at 0.5: the median patch carries ~2 of 60 labels, so a calibrated head
+# keeps every score far below 0.5 and a fixed cutoff reports calibration instead of
+# localization. `boundary_f1s` (0.5) stays in the CSV for comparability with anything else
+# logged at 0.5.
+REPORTED = ["macro_map", "boundary_best_f1s"]
+
+TITLES = {
+    "macro_map": "Macro mAP (per patch)",
+    "micro_map": "Micro mAP (per patch)",
+    "boundary_best_f1s": "Boundary F1 (swept)",
+}
+
+BEGIN = "<!-- GENERATED by gen.py -- do not edit below this line -->"
+END = "<!-- /GENERATED -->"
+
+
+def _relative(path: str | None) -> str | None:
+    """Repo-relative form of a recorded path, whichever way it was written."""
+
+    if not path:
+        return None
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return str(candidate)
+    try:
+        return str(candidate.relative_to(ROOT))
+    except ValueError:
+        return str(candidate)
+
+
+def collect() -> pl.DataFrame:
+    """One row per probed cell, with the provenance its own config.yaml records."""
+
+    rows = []
+    # rglob, not a fixed-depth glob: replicates nest an extra segment or two
+    # (corpus/arch/seed1/cell, corpus/arch/seed1/rep2/cell) and a fixed depth would find
+    # the canonical runs and silently skip every replicate.
+    # `in_*`, not `in_*__loss_*`: an objective that reconstructs nothing names its cells
+    # for their input channels alone, and the narrower glob made every JEPA run invisible
+    # here rather than raising.
+    for metrics_path in sorted(RUNS.rglob("in_*/metrics.json")):
+        cell = metrics_path.parent
+        parts = cell.relative_to(RUNS).parts
+        if len(parts) < 3:
+            continue
+        payload = json.loads(metrics_path.read_text())
+
+        config_path = cell / "config.yaml"
+        config = OmegaConf.load(config_path) if config_path.exists() else None
+
+        name = cell.name
+        rows.append(
+            {
+                "corpus": parts[0],
+                "arch": parts[1],
+                # "" for the canonical run, else "seed1", "seed1/rep2", ...
+                "replicate": "/".join(parts[2:-1]),
+                "cell": name,
+                "input": name.removeprefix("in_").split("__")[0],
+                # None where the objective has no reconstruction target. Null rather than
+                # a sentinel string so it groups, sorts and renders as missing everywhere
+                # downstream instead of pretending to be a fourth channel set.
+                "loss": name.split("__loss_")[1] if "__loss_" in name else None,
+                # Every payload key below is optional: a probe run records `weight_decay`
+                # and a fine-tune records the recipe it ran under instead, and one folder
+                # reads both trees. A missing key is a column of nulls, not a KeyError.
+                "weight_decay": payload.get("weight_decay"),
+                "layer_decay": payload.get("layer_decay"),
+                "pool": payload.get("pool"),
+                # Budget against what ran. They differ exactly where early stopping fired,
+                # which is the one thing a fine-tuning table needs that a probe's does not.
+                "epochs": payload.get("epochs"),
+                "epochs_run": payload.get("epochs_run"),
+                **{key: payload["metrics"][key] for key in METRICS},
+                # Which statistics the frozen backbone was fed. A probe read under the wrong
+                # ones is not an error anywhere, just quietly offset features, so it belongs
+                # in the table rather than in a sentence.
+                "normalization": Path(config.dataloader.normalization).name if config else None,
+                # Recorded as-written. These predate the runs/ restructure and still name
+                # the old flat directories, so they are a record of what was probed, not a
+                # path you can open today.
+                "checkpoint": _relative(config.model.get("checkpoint")) if config else None,
+            }
+        )
+
+    if not rows:
+        raise FileNotFoundError(f"no metrics.json under {RUNS}")
+    return pl.DataFrame(rows)
+
+
+def has_loss_axis(df: pl.DataFrame) -> bool:
+    """Whether this subset's objective reconstructs channels at all.
+
+    MAE and SimMIM do, so their cells are `in_<x>__loss_<y>` and the natural table is the
+    3x3. JEPA predicts an EMA teacher's embedding and has no reconstruction target, so its
+    cells are plain `in_<x>` and there is one axis to tabulate rather than two -- which also
+    means it can only ever replicate the input-channel finding, never the loss-channel one.
+
+    Read off the rows rather than off the architecture name: the name is a directory naming
+    convention that could change, this is a fact about what was run.
+    """
+
+    return df["loss"].null_count() < len(df)
+
+
+def ladder(df: pl.DataFrame, metric: str) -> str:
+    """The input axis alone, for an objective with no loss axis to cross it against."""
+
+    stats = {}
+    for (inp,), group in df.group_by("input"):
+        values = group[metric]
+        stats[inp] = (values.mean(), values.std() if len(values) > 1 else None)
+    best = max(mean for mean, _ in stats.values())
+
+    lines = [f"| Input | {TITLES.get(metric, metric)} |", "| :--- | :---: |"]
+    for row in AXIS:
+        entry = stats.get(row)
+        if entry is None:
+            lines.append(f"| **{row}** | -- |")
+            continue
+        mean, sd = entry
+        text = f"**{mean:.4f}**" if mean == best else f"{mean:.4f}"
+        if sd is not None:
+            text += f" ±{sd:.4f}"
+        lines.append(f"| **{row}** | {text} ({(mean - best) / best:+.1%}) |")
+    return "\n".join(lines)
+
+
+def matrix(df: pl.DataFrame, metric: str) -> str:
+    """A 3x3 input-by-loss table, bolding the best cell.
+
+    Falls back to a single column when the objective has no loss axis; see
+    :func:`has_loss_axis`.
+
+    Cells hold the mean over whatever replicates exist, with the sample standard deviation
+    beside it once there is more than one. A single number with no spread beside it is a
+    single run, and should be read as such. The percentage is the cell's shortfall against
+    the best cell of the same table.
+    """
+
+    if not has_loss_axis(df):
+        return ladder(df, metric)
+
+    stats = {}
+    for (inp, loss), group in df.group_by("input", "loss"):
+        values = group[metric]
+        stats[(inp, loss)] = (values.mean(), values.std() if len(values) > 1 else None, len(values))
+    best = max(mean for mean, _, _ in stats.values())
+
+    lines = [
+        "| Input \\ Loss | " + " | ".join(AXIS) + " |",
+        "| :--- |" + " :---: |" * len(AXIS),
+    ]
+    for row in AXIS:
+        cells = []
+        for col in AXIS:
+            entry = stats.get((row, col))
+            if entry is None:
+                cells.append("--")
+                continue
+            mean, sd, n = entry
+            text = f"**{mean:.4f}**" if mean == best else f"{mean:.4f}"
+            if sd is not None:
+                text += f" ±{sd:.4f}"
+            # Relative to the best cell in this table, not to the grand mean: the question
+            # a matrix gets read for is "how much is this cell giving up", and 4-decimal
+            # absolutes make a 2% shortfall and a 0.2% one look alike.
+            cells.append(f"{text} ({(mean - best) / best:+.1%})")
+        lines.append(f"| **{row}** | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def pooled_sigma(df: pl.DataFrame, corpus: str, arch: str, metric: str) -> tuple[float | None, int]:
+    """Replicate standard deviation pooled over cells, and runs per cell.
+
+    Pooled rather than per-cell: with three replicates a per-cell sd carries two degrees of
+    freedom, so one cell here lands at 0.0003 and another at 0.0055 largely by luck. The
+    per-cell numbers stay visible in the matrix, where they describe that cell; the pooled
+    one is what a difference gets tested against.
+    """
+
+    per_cell = (
+        df.filter((pl.col("corpus") == corpus) & (pl.col("arch") == arch))
+        .group_by("cell")
+        .agg(pl.len().alias("n"), pl.col(metric).std().alias("sd"))
+    )
+    replicated = per_cell.filter(pl.col("n") > 1)
+    if replicated.is_empty():
+        return None, int(per_cell["n"].max())
+    return float(replicated["sd"].mean()), int(replicated["n"].max())
+
+
+def delta(df: pl.DataFrame, base: str, other: str, arch: str, metric: str) -> tuple[str, str]:
+    """Signed difference table, `other` minus `base`, in raw units and in sigmas.
+
+    A raw delta cannot be read without holding the replicate spread in mind, and a sigma
+    alone throws away effect size, so each cell carries both. Returns the table and a
+    one-line note stating the standard error it was divided by.
+    """
+
+    def values(corpus):
+        rows = (
+            df.filter((pl.col("corpus") == corpus) & (pl.col("arch") == arch))
+            .group_by("input", "loss")
+            .agg(pl.col(metric).mean())
+        )
+        return {(r["input"], r["loss"]): r[metric] for r in rows.iter_rows(named=True)}
+
+    a, b = values(base), values(other)
+    sigma_a, n_a = pooled_sigma(df, base, arch, metric)
+    sigma_b, n_b = pooled_sigma(df, other, arch, metric)
+
+    # Either corpus may be unreplicated. Use whichever sigma exists -- an unreplicated
+    # corpus still varies by seed, it just has not been measured, so borrowing the
+    # measured one is less wrong than pretending its variance is zero.
+    sigma = next((x for x in (sigma_a, sigma_b) if x is not None), None)
+    se = None if sigma is None else sigma * (1 / n_a + 1 / n_b) ** 0.5
+    diffs = {key: b[key] - a[key] for key in a.keys() & b.keys()}
+
+    # The key is (input, loss) either way; an objective with no loss axis just has None in
+    # the second slot, so one column rather than three.
+    columns = AXIS if has_loss_axis(df.filter(pl.col("arch") == arch)) else [None]
+
+    lines = [
+        "| Input \\ Loss | " + " | ".join(c or "--" for c in columns) + " |",
+        "| :--- |" + " :---: |" * len(columns),
+    ]
+    for row in AXIS:
+        cells = []
+        for col in columns:
+            d = diffs.get((row, col))
+            if d is None:
+                cells.append("--")
+                continue
+            cells.append(f"{d:+.4f}" if se is None else f"{d:+.4f} ({d / se:+.1f}σ)")
+        lines.append(f"| **{row}** | " + " | ".join(cells) + " |")
+
+    if se is None:
+        note = f"*No replicates on either corpus, so these deltas have no error bar.*"
+    else:
+        borrowed = "" if (sigma_a and sigma_b) else f", σ borrowed from `{base if sigma_a else other}`"
+        # Derived, not hardcoded: the correction depends on how many cells are compared,
+        # and the axis is a constant that could change.
+        # Derived from the table actually drawn, not from AXIS squared: a one-axis
+        # objective compares three cells, and correcting as if for nine would set the bar
+        # higher than the family being read.
+        cells = len(AXIS) * len(columns)
+        bonferroni = NormalDist().inv_cdf(1 - 0.05 / (2 * cells))
+        note = (
+            f"*Each cell reads `delta (z)`. The σ figure **is** z = delta / SE: how many "
+            f"standard errors of the difference the delta is, not how many seed sd's. "
+            f"σ = {sigma:.4f} is the seed spread pooled over cells; with n = {n_a} vs "
+            f"{n_b} runs the difference of two means has SE = {se:.4f}{borrowed}, so "
+            f"1σ here = {se:.4f} {TITLES.get(metric, metric)}. |z| > 2 is marginal (p < 0.05 for one "
+            f"pre-chosen cell); reading the whole {cells}-cell matrix and picking the "
+            f"largest needs |z| > {bonferroni:.2f} to keep the same 5% false-positive "
+            f"rate over the table.*"
+        )
+    return "\n".join(lines), note
+
+
+def expected_range(n: int) -> float:
+    """E[max - min] of n iid standard normals -- the d2 constant of control charting.
+
+    Nine cells drawn from *pure noise* do not land on top of each other: the largest and
+    smallest of nine draws are ~3 sd apart by construction. So the question "is this
+    matrix structured" is asked against ~3, not against 0, and a matrix spanning 2 sd is
+    spreading *less* than noise would.
+
+    Derived rather than tabulated so it follows the cell count: E[range] = 2*E[max] for a
+    symmetric distribution, and E[max] = n * integral of x*phi(x)*Phi(x)^(n-1).
+    """
+
+    if n < 2:
+        return 0.0
+    normal = NormalDist()
+    integrand = lambda x: x * normal.pdf(x) * normal.cdf(x) ** (n - 1)
+    return 2 * n * integrate.quad(integrand, -10, 10)[0]
+
+
+def rankability(df: pl.DataFrame, metric: str) -> list[str]:
+    """Is the cell-to-cell spread bigger than seed noise makes it?
+
+    Same test `results/probe/carepd_updrs_convex` runs per cohort, where it comes out the
+    other way: there 1 of 12 cohort-protocol blocks clears the bar, so the nine cells are
+    unrankable within a cohort. BABEL scores one pooled validation set rather than a
+    handful of held-out subjects, which is most likely why the same nine checkpoints
+    separate cleanly here and not there.
+    """
+
+    rows = []
+    for (corpus, arch), group in sorted(df.group_by("corpus", "arch")):
+        per_cell = group.group_by("cell").agg(
+            pl.col(metric).mean().alias("mean"),
+            pl.col(metric).std().alias("sd"),
+            pl.len().alias("n"),
+        )
+        means = [m for m in per_cell["mean"].to_list() if m is not None]
+        sds = [v for v in per_cell.filter(pl.col("n") > 1)["sd"].to_list() if v is not None]
+        if len(means) < 2 or not sds:
+            continue
+        sigma = sum(sds) / len(sds)
+        spread = max(means) - min(means)
+        rows.append((corpus, arch, len(means), spread, sigma, spread / sigma))
+
+    if not rows:
+        return []
+
+    lines = [
+        "## Can the cells be ranked?",
+        "",
+        "| corpus | arch | cells | range | seed σ | range / σ | noise bar | verdict |",
+        "| :--- | :--- | ---: | ---: | ---: | ---: | ---: | :--- |",
+    ]
+    for corpus, arch, n, spread, sigma, ratio in rows:
+        bar = expected_range(n)
+        lines.append(
+            f"| {corpus} | {arch} | {n} | {spread:.4f} | {sigma:.4f} | {ratio:.2f} | "
+            f"{bar:.2f} | " + ("**above noise**" if ratio > bar else "within noise") + " |"
+        )
+    lines += [
+        "",
+        "*Range across the cell means over the seed sd pooled across cells. The bar is "
+        "E[range] of that many draws from pure noise -- nine identical cells still spread, "
+        "so the comparison is against ~3σ, not 0. Above the bar the matrix carries "
+        "structure worth ranking; below it, the best cell is a selection effect.*",
+        "",
+    ]
+    return lines
+
+
+def marginals(df: pl.DataFrame, metric: str) -> list[str]:
+    """The p -> pk -> pkd ladder for each axis, with the step between each rung.
+
+    Steps rather than all three pairwise contrasts: the axes are nested (pk adds velocity
+    and acceleration to p, pkd adds torque to pk), so the question is where along the
+    ladder the gain appears, and consecutive differences answer that directly. The third
+    pairwise contrast is the total, which is the last column.
+
+    Signed as `next - current`, so positive means widening helped. Paired on replicate,
+    averaging over the other axis first -- cells share a seed, and seed spread is several
+    times these effects, so an unpaired view buries them.
+    """
+
+    steps = [(AXIS[i], AXIS[i + 1]) for i in range(len(AXIS) - 1)]
+
+    def paired(group, axis, lo, hi):
+        """Mean of (hi - lo) over replicates, with its two-sided paired p."""
+
+        wide = (
+            group.group_by("replicate", axis)
+            .agg(pl.col(metric).mean())
+            .pivot(on=axis, index="replicate", values=metric)
+            .drop_nulls()
+        )
+        if lo not in wide.columns or hi not in wide.columns or wide.height < 2:
+            return None, None, 0
+        diff = (wide[hi] - wide[lo]).to_list()
+        n = len(diff)
+        mean = sum(diff) / n
+        sd = (sum((d - mean) ** 2 for d in diff) / (n - 1)) ** 0.5
+        if sd == 0:
+            return mean, None, n
+        t = mean / (sd / n**0.5)
+        return mean, float(2 * stats.t.sf(abs(t), n - 1)), n
+
+    rows, pairs = [], 0
+    for (corpus, arch), group in sorted(df.group_by("corpus", "arch")):
+        if group.group_by("cell").len()["len"].max() < 2:
+            continue
+        # `loss` only where there is one. Grouping on an all-null column would otherwise
+        # produce a single row labelled None and report it as a marginal level.
+        for axis in ("input", "loss") if has_loss_axis(group) else ("input",):
+            levels = {
+                r[axis]: r[metric]
+                for r in group.group_by(axis).agg(pl.col(metric).mean()).iter_rows(named=True)
+            }
+            measured = [paired(group, axis, lo, hi) for lo, hi in steps]
+            total = paired(group, axis, AXIS[0], AXIS[-1])
+            pairs = max(pairs, total[2], *(m[2] for m in measured))
+            rows.append((corpus, arch, axis, levels, measured, total))
+
+    if not rows:
+        return []
+
+    # Corrected over every step and total shown, the whole scanned family.
+    tests = sum(len(r[4]) + 1 for r in rows)
+
+    def cell(entry):
+        mean, pv, n = entry
+        if mean is None:
+            return "--"
+        if pv is None:
+            return f"{mean:+.4f}"
+        text = "<0.001" if pv < 0.001 else f"={pv:.3f}"
+        return (f"**{mean:+.4f}**" if pv < 0.05 / tests else f"{mean:+.4f}") + f" (p{text})"
+
+    def step_cell(entry):
+        mean, pv, n = entry
+        if mean is None:
+            return "--"
+        if pv is None:
+            return f"{mean:+.4f}"
+        text = "<0.001" if pv < 0.001 else f"{pv:.3f}"
+        return (f"**{mean:+.4f}**" if pv < 0.05 / tests else f"{mean:+.4f}") + f" ({text})"
+
+    lines = [
+        "## Marginal level of each axis",
+        "",
+        "| corpus | arch | axis | " + " | ".join(f"`{lv}`" for lv in AXIS) + " |",
+        "| :--- | :--- | :--- |" + " ---: |" * len(AXIS),
+    ]
+    for corpus, arch, axis, levels, _, _ in rows:
+        lines.append(
+            f"| {corpus} | {arch} | {axis} | "
+            + " | ".join(f"{levels[lv]:.4f}" if lv in levels else "--" for lv in AXIS)
+            + " |"
+        )
+    lines += [
+        "",
+        "*Each value averages over the other axis. Levels only -- whether a difference "
+        "between them is real is the next table.*",
+        "",
+        "## Where along the ladder the gain appears",
+        "",
+        "| corpus | arch | axis | "
+        + " | ".join(f"`{lo}`→`{hi}`" for lo, hi in steps)
+        + f" | total `{AXIS[0]}`→`{AXIS[-1]}` |",
+        "| :--- | :--- | :--- |" + " ---: |" * (len(steps) + 1),
+    ]
+    for corpus, arch, axis, _, measured, total in rows:
+        lines.append(
+            f"| {corpus} | {arch} | {axis} | "
+            + " | ".join(step_cell(e) for e in [*measured, total])
+            + " |"
+        )
+    lines += [
+        "",
+        f"*Paired step to the next rung, signed so positive means widening helped. Cells "
+        f"share a seed and seed spread is several times these effects, so each step is "
+        f"paired on replicate (n = {pairs}) rather than compared as independent means. "
+        f"Parenthesis is the two-sided paired p; bold is significant at 0.05 "
+        f"Bonferroni-corrected over the {tests} steps and totals shown. At three "
+        "replicates a p rests on two degrees of freedom -- read direction and magnitude "
+        "before decisions.*",
+        "",
+    ]
+    return lines
+
+
+def best_cells(df: pl.DataFrame) -> str:
+    """Top cell per (corpus, arch) by macro mAP, with every metric beside it."""
+
+    header = ["corpus", "arch", "cell", "runs", *REPORTED]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| :--- | :--- | :--- | ---: |" + " ---: |" * len(REPORTED),
+    ]
+    for (corpus, arch), group in sorted(df.group_by("corpus", "arch")):
+        averaged = group.group_by("cell").agg(
+            pl.len().alias("n"), *[pl.col(m).mean() for m in REPORTED]
+        )
+        row = averaged.sort("macro_map", descending=True).row(0, named=True)
+        lines.append(
+            f"| {corpus} | {arch} | `{row['cell']}` | {row['n']} | "
+            + " | ".join(f"{row[m]:.4f}" for m in REPORTED)
+            + " |"
+        )
+    return "\n".join(lines)
+
+
+def reference_points(df: pl.DataFrame) -> list[str]:
+    """Render baselines.json, if present, against the best cell in the matrix.
+
+    These do not come from runs/, so they cannot be derived the way everything else here
+    is. They live in a JSON file rather than in the prose so the comparison against the
+    best cell is computed, and so each carries its own protocol note -- the floor is only
+    meaningful if you can see how it was measured.
+    """
+
+    path = HERE / "baselines.json"
+    if not path.exists():
+        return []
+
+    baselines = json.loads(path.read_text())
+    best = {m: df[m].max() for m in REPORTED}
+
+    lines = [
+        "## Reference points",
+        "",
+        "| baseline | " + " | ".join(TITLES.get(m, m) for m in REPORTED) + " | vs best cell | protocol |",
+        "| :--- |" + " ---: |" * (len(REPORTED) + 1) + " :--- |",
+    ]
+    for name, entry in baselines.items():
+        ratio = f"{best[REPORTED[0]] / entry[REPORTED[0]]:.2f}x" if entry.get(REPORTED[0]) else "--"
+        values = " | ".join(
+            f"{entry[m]:.4f}" if entry.get(m) is not None else "--" for m in REPORTED
+        )
+        lines.append(f"| {name} | {values} | {ratio} | {entry['protocol']} |")
+    lines += [
+        "",
+        f"*Best cell: {best[REPORTED[0]]:.4f} macro mAP, taken over every architecture "
+        "present, so it is the best result on the board rather than the best MAE one.*",
+        "",
+    ]
+    lines += [f"- **{name}** -- {entry['note']}" for name, entry in baselines.items()]
+    lines += [""]
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Figures.
+#
+# The tables above are the record; these are for reading the record at a glance.
+# Three axes, one figure each: the matrix of one (corpus, arch), the objectives
+# against each other on one corpus, and one objective across corpora.
+#
+# Colors are not chosen by eye. Magnitude gets one hue light->dark, polarity gets
+# nothing (the zero line and the bands carry the sign, so a red/blue split would
+# encode it twice), and the four architecture hues are a fixed order validated for
+# colorblind separation -- worst adjacent pair dE 9.1 under protanopia, above the
+# 8 bar. Two of them fall under 3:1 against the surface, so every line is also
+# labelled at its right end rather than identified by color alone.
+SEQUENTIAL = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
+INK, MUTED, GRID, MISSING = "#1a1a19", "#5c5c58", "#e6e5e1", "#f0efec"
+SURFACE = "#fcfcfb"
+
+FIGURES = HERE / "figures"
+
+# Baselines kept in baselines.json for the tables but not drawn: `moments` sat close
+# enough to the runs to rescale every ladder panel around itself.
+HIDDEN_BASELINES = {"moments"}
+
+
+def _style(ax: "plt.Axes") -> None:
+    """Recessive frame: the marks carry the chart, the box around them does not."""
+
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(GRID)
+    ax.tick_params(colors=MUTED, labelsize=8, length=3)
+    ax.set_facecolor(SURFACE)
+
+
+def _save(fig: "plt.Figure", name: str) -> str:
+    FIGURES.mkdir(exist_ok=True)
+    fig.savefig(FIGURES / name, dpi=200, bbox_inches="tight", facecolor=SURFACE)
+    plt.close(fig)
+    return f"figures/{name}"
+
+
+def cell_means(group: pl.DataFrame, metric: str) -> dict[tuple[str, str | None], tuple[float, float | None]]:
+    """(input, loss) -> (mean over replicates, sd where there is more than one)."""
+
+    out = {}
+    for (inp, loss), cell in group.group_by("input", "loss"):
+        values = cell[metric]
+        out[(inp, loss)] = (values.mean(), values.std() if len(values) > 1 else None)
+    return out
+
+
+def fig_matrix(df: pl.DataFrame, metric: str) -> str | None:
+    """Every (corpus, arch) matrix as a small multiple, each on its own color scale.
+
+    Color ranks cells *within* a panel and says nothing across panels -- the same
+    convention the tables use, where the percentage beside a cell is its shortfall
+    against the best cell of that table and never against another table's. A shared
+    scale would rank the objectives against each other instead, at the cost of
+    flattening the 0.345-0.367 MAE matrix into one uniform block; the levels are what
+    the printed numbers and the ladder figure are for.
+
+    Each cell prints its shortfall against the best cell of its own panel, the same
+    number the README tables carry beside it, since the shade alone orders the cells
+    without saying how far apart they are.
+
+    Every (corpus, arch) that was probed gets a panel, including the ones with a single
+    filled cell: the eight blanks around it are the point, since what a corpus has *not*
+    been swept over is as much a fact about the board as the scores that exist. A lone
+    cell is drawn mid-ramp -- with nothing to rank it against, its shade means nothing.
+    """
+
+    panels = []
+    for (corpus, arch), group in sorted(df.group_by("corpus", "arch")):
+        means = cell_means(group, metric)
+        panels.append((corpus, arch, means, has_loss_axis(group)))
+    if not panels:
+        return None
+
+    cmap = LinearSegmentedColormap.from_list("sequential", SEQUENTIAL)
+    cmap.set_bad(MISSING)
+
+    ncols = min(3, len(panels))
+    nrows = -(-len(panels) // ncols)
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(3.4 * ncols, 3.6 * nrows), squeeze=False, layout="constrained"
+    )
+    for ax in axes.flat:
+        ax.set_axis_off()
+
+    for ax, (corpus, arch, means, loss_axis) in zip(axes.flat, panels):
+        columns = AXIS if loss_axis else [None]
+        grid = np.full((len(AXIS), len(columns)), np.nan)
+        for i, row in enumerate(AXIS):
+            for j, col in enumerate(columns):
+                if (row, col) in means:
+                    grid[i, j] = means[(row, col)][0]
+
+        lo = min(mean for mean, _ in means.values())
+        hi = max(mean for mean, _ in means.values())
+        # One cell has no range to normalize against; widen it so the cell lands mid-ramp
+        # rather than at the dark end, where it would read as a top score.
+        span = (lo, hi) if hi > lo else (lo * 0.98, hi * 1.02)
+        ax.set_axis_on()
+        ax.imshow(grid, cmap=cmap, vmin=span[0], vmax=span[1], aspect="equal")
+        ax.set_xticks(range(len(columns)), [c or "--" for c in columns])
+        ax.set_yticks(range(len(AXIS)), AXIS)
+        ax.set_xlabel("loss channels" if loss_axis else "no loss axis", fontsize=8, color=MUTED)
+        ax.set_ylabel("input channels", fontsize=8, color=MUTED)
+        # Range in the title, since each panel carries its own scale and there is no
+        # shared bar to read it off.
+        extent = f"{lo:.3f} – {hi:.3f}" if hi > lo else f"{lo:.3f}, one cell"
+        ax.set_title(f"{corpus}\n{arch}\n{extent}", fontsize=9, color=INK)
+        _style(ax)
+        ax.spines["left"].set_visible(False)
+        ax.spines["bottom"].set_visible(False)
+        ax.tick_params(length=0)
+
+        for i, row in enumerate(AXIS):
+            for j, col in enumerate(columns):
+                entry = means.get((row, col))
+                if entry is None:
+                    continue
+                mean, sd = entry
+                # Ink flips on the dark half of the ramp so the number stays readable
+                # in the strongest cells as well as the palest.
+                shade = INK if (mean - span[0]) / (span[1] - span[0]) < 0.55 else SURFACE
+                # Same shortfall the README tables print: against the best cell of this
+                # panel, which is also what the color ramp is normalized to, so the
+                # percentage and the shade are two readings of one number.
+                below = f"{(mean - hi) / hi:+.1%}"
+                ax.text(j, i - 0.1, f"{mean:.3f}", ha="center", va="center",
+                        fontsize=9, color=shade)
+                ax.text(j, i + 0.18, f"±{sd:.3f} ({below})" if sd else below,
+                        ha="center", va="center", fontsize=6.5, color=shade)
+
+    # No colorbar: with a per-panel scale one bar would be wrong for every panel but the
+    # one it was drawn from. Each panel's range is in its title instead.
+    fig.suptitle(
+        f"{TITLES.get(metric, metric)} -- color is within-panel only", fontsize=9, color=MUTED
+    )
+    return _save(fig, f"{metric}_matrix.png")
+
+
+def corpus_color(corpus: str, df: pl.DataFrame) -> str:
+    """The hue a corpus owns, indexed over every corpus including the held-out ones.
+
+    Color follows the entity, not its rank in whatever subset is being drawn. Indexing
+    into the corpora actually present meant excluding `amass_motionx_clean` repainted
+    `amass_smpl` from the third hue to the second, so the same corpus was a different
+    color in two regenerations of the same figure.
+    """
+
+    order = sorted(set(df["corpus"]) | EXCLUDE_CORPORA)
+    return SERIES[order.index(corpus) % len(SERIES)]
+
+
+def _short(arch: str) -> str:
+    """Architecture name minus the part every architecture shares.
+
+    `medium_100ep_simmim` does not fit over a two-bar panel, and the prefix is the same
+    on every one of them, so it distinguishes nothing. Derived from the name rather than
+    a lookup table, since the objective suffix is the naming convention this whole report
+    reads architectures through.
+    """
+
+    return arch.replace("medium_100ep", "").lstrip("_") or "mae"
+
+
+def _spread(ax: "plt.Axes", labels: list[tuple[float, float, str, str]]) -> None:
+    """Right-end labels nudged apart where two architectures land on the same score.
+
+    Needed because the labels are the relief for a palette whose weaker hues fall under
+    3:1 against the surface -- two labels printed on top of each other are worse than
+    the color alone, which is what `jepa` and `mask70` did at `pkd`.
+    """
+
+    if not labels:
+        return
+    low, high = ax.get_ylim()
+    gap = 0.05 * (high - low)
+    placed = None
+    for y, x, text, color in sorted(labels):
+        y = y if placed is None else max(y, placed + gap)
+        placed = y
+        ax.annotate(text, (x, y), textcoords="offset points", xytext=(6, 0),
+                    fontsize=7, color=color, va="center")
+
+
+def fig_ladder(df: pl.DataFrame, metric: str) -> str | None:
+    """One ladder per architecture: what each sweep axis buys, corpus against corpus.
+
+    Split per architecture rather than drawing every objective on one pair of panels. A
+    shared y-axis has to span SimMIM at 0.12 and MAE at 0.37, and at that scale MAE's
+    ladder -- the +0.016 the loss axis actually buys, which is the whole loss-channel
+    finding -- is a flat line. A row per architecture, each row on its own scale, shows
+    the shape of every objective's ladder, and the matrices carry the absolute levels.
+
+    Lines are corpora, so each panel also answers the same-model-across-corpora question
+    directly rather than through a difference table.
+
+    Points average over the other axis within a replicate first, then over replicates,
+    matching the pairing in :func:`marginals`. Error bars are the seed sd and appear only
+    where the level has more than one replicate. Behind the mean, each seed is drawn as
+    its own faint ladder: a mean that climbs while no individual seed climbs is an
+    artifact of averaging, and a sd standing on two seeds should not read as a
+    distribution. Seeds carry a small constant x-offset so two that agree stay two lines.
+    """
+
+    archs = sorted(df["arch"].unique())
+    corpora = sorted(df["corpus"].unique())
+    columns = ["input", "loss"] if has_loss_axis(df) else ["input"]
+
+    fig, axes = plt.subplots(
+        len(archs), len(columns), figsize=(3.8 * len(columns), 2.7 * len(archs)),
+        squeeze=False, sharey="row", sharex=True,
+    )
+    for r, arch in enumerate(archs):
+        subset = df.filter(pl.col("arch") == arch)
+        live = []
+        for c, axis in enumerate(columns):
+            ax = axes[r][c]
+            # An objective with no reconstruction target has no loss panel to draw. Blank
+            # it rather than plotting an empty frame that implies a sweep that never ran.
+            if axis == "loss" and not has_loss_axis(subset):
+                ax.set_axis_off()
+                continue
+            live.append(ax)
+            _style(ax)
+            ax.grid(axis="y", color=GRID, linewidth=0.8)
+            ax.set_axisbelow(True)
+
+            labels = []
+            for corpus in corpora:
+                group = subset.filter(pl.col("corpus") == corpus)
+                if group.is_empty():
+                    continue
+                per_rep = group.group_by("replicate", axis).agg(pl.col(metric).mean())
+                points = [
+                    (AXIS.index(level), values.mean(), values.std() if len(values) > 1 else None)
+                    for level in AXIS
+                    if len(values := per_rep.filter(pl.col(axis) == level)[metric])
+                ]
+                if not points:
+                    continue
+                color = corpus_color(corpus, df)
+
+                seeds = sorted(per_rep["replicate"].unique())
+                # Offset is constant along a seed's ladder, not per point: jittering each
+                # point independently would put a wiggle in a line whose whole job is to
+                # show the shape the mean claims.
+                offsets = np.linspace(-0.07, 0.07, len(seeds)) if len(seeds) > 1 else [0.0]
+                for seed, offset in zip(seeds, offsets):
+                    scores = {
+                        row[axis]: row[metric]
+                        for row in per_rep.filter(pl.col("replicate") == seed).iter_rows(named=True)
+                    }
+                    levels = [level for level in AXIS if level in scores]
+                    ax.plot([AXIS.index(level) + offset for level in levels],
+                            [scores[level] for level in levels],
+                            color=color, alpha=0.35, linewidth=1, marker="o", markersize=3,
+                            zorder=2)
+
+                x, y = [p[0] for p in points], [p[1] for p in points]
+                ax.errorbar(x, y, yerr=[p[2] or 0.0 for p in points], color=color, linewidth=2.4,
+                            marker="o", markersize=6, capsize=3, elinewidth=1, label=corpus,
+                            zorder=3)
+                labels.append((y[-1], x[-1], corpus.removeprefix("amass_"), color))
+            _spread(ax, labels)
+
+            ax.set_xticks(range(len(AXIS)), AXIS)
+            ax.set_xlim(-0.35, len(AXIS) - 0.3)
+            if r == len(archs) - 1:
+                ax.set_xlabel(f"{axis} channels", fontsize=8, color=MUTED)
+            if r == 0:
+                ax.set_title(f"{axis} channels", fontsize=9, color=INK)
+
+        axes[r][0].set_ylabel(f"{arch}\n{TITLES.get(metric, metric)}", fontsize=8, color=INK)
+
+        # Reference lines, but only those inside the span this row's runs occupy: chance at
+        # 0.04 would rescale every panel to hide the differences the figure exists for.
+        path = HERE / "baselines.json"
+        if path.exists():
+            low, high = axes[r][0].get_ylim()
+            for name, entry in json.loads(path.read_text()).items():
+                value = entry.get(metric)
+                if name in HIDDEN_BASELINES or value is None or not low < value < high:
+                    continue
+                # `live` only: a blanked panel still holds an axes object, and drawing the
+                # line there left `moments` floating in the frame JEPA has no sweep for.
+                for ax in live:
+                    ax.axhline(value, color=MUTED, linewidth=1, linestyle="--", zorder=0)
+                live[-1].annotate(name, (len(AXIS) - 1, value), textcoords="offset points",
+                                  xytext=(0, 4), fontsize=7, color=MUTED, ha="right")
+
+    handles, labels = [], []
+    for ax in axes.flat:
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            if label not in labels:
+                handles.append(handle)
+                labels.append(label)
+    if not handles:
+        plt.close(fig)
+        return None
+    fig.legend(handles, labels, loc="lower center", ncols=len(labels), frameon=False,
+               fontsize=8, bbox_to_anchor=(0.5, -0.02))
+    fig.tight_layout()
+    return _save(fig, f"{metric}_ladder.png")
+
+
+def fig_corpora(df: pl.DataFrame, metric: str) -> str | None:
+    """Corpus against corpus, cell by cell, one panel per architecture and challenger.
+
+    A panel holds only the cells both corpora were actually probed on -- `amass_smpl` has
+    one, so its panels are one pair of bars wide while `amass_motionx_clean` gets nine.
+    Panel width follows the cell count, so a one-cell comparison cannot look as
+    substantial as a nine-cell one.
+
+    Cell by cell rather than averaged over the matched cells: the average says whether
+    the corpus moved the architecture overall, and hides that it could have moved
+    `in_p__loss_p` up and `in_pkd__loss_pkd` down. Error bars are the seed sd of that
+    cell, the same number the matrix prints beside it.
+
+    Bars run from zero, so the differences look as small as they are -- for MAE and JEPA
+    they are, and the delta tables carry the signed numbers with their error bars.
+
+    One unmatched column is added on the right: the base corpus's best cell, when its
+    best is not one of the matched ones. The matched columns answer "same cell, which
+    corpus", and on a corpus swept over one cell that is the only comparison available --
+    but it compares `amass_clean` at `in_p__loss_p`, which is its *worst* MAE cell, so
+    without this column the figure reads as a tie the sweep does not support. It is a
+    single bar, not a pair, because the other corpus has no such cell to draw against it.
+    """
+
+    corpora = sorted(df["corpus"].unique())
+    if len(corpora) < 2:
+        return None
+    base = corpora[0]
+
+    panels = []
+    for arch in sorted(df["arch"].unique()):
+        subset = df.filter(pl.col("arch") == arch)
+        per_corpus = {
+            corpus: cell_means(subset.filter(pl.col("corpus") == corpus), metric)
+            for corpus in corpora
+        }
+        best = max(per_corpus[base], key=lambda k: per_corpus[base][k][0], default=None)
+        for other in corpora[1:]:
+            keys = sorted(
+                per_corpus[base].keys() & per_corpus[other].keys(),
+                key=lambda k: (AXIS.index(k[0]), AXIS.index(k[1]) if k[1] else -1),
+            )
+            if keys:
+                extra = [best] if best is not None and best not in keys else []
+                panels.append((arch, other, keys, extra, per_corpus))
+    if not panels:
+        return None
+
+    fig, axes = plt.subplots(
+        1, len(panels), squeeze=False, layout="constrained", sharey=True,
+        figsize=(0.55 * sum(len(k) + len(e) for _, _, k, e, _ in panels) + 0.9 * len(panels), 4.0),
+        gridspec_kw={"width_ratios": [len(k) + len(e) + 0.6 for _, _, k, e, _ in panels]},
+    )
+    width = 0.38
+    seen = set()
+    for ax, (arch, other, keys, extra, per_corpus) in zip(axes[0], panels):
+        _style(ax)
+        ax.grid(axis="y", color=GRID, linewidth=0.8)
+        ax.set_axisbelow(True)
+        columns = keys + extra
+        for b, corpus in enumerate((base, other)):
+            cells = [(i, per_corpus[corpus][key]) for i, key in enumerate(columns)
+                     if key in per_corpus[corpus]]
+            ax.bar(
+                # A column only one corpus fills sits centered: offsetting it would leave
+                # a gap reading as a bar the other corpus scored zero on.
+                [i + ((b - 0.5) * width if columns[i] in keys else 0.0) for i, _ in cells],
+                [mean for _, (mean, _) in cells],
+                width * 0.94,
+                color=corpus_color(corpus, df),
+                yerr=[sd or 0.0 for _, (_, sd) in cells],
+                ecolor=INK, capsize=3, error_kw={"elinewidth": 1},
+                label=None if corpus in seen else corpus,
+            )
+            seen.add(corpus)
+        ax.set_xticks(
+            range(len(columns)),
+            ["/".join(part for part in key if part) + ("\nbest" if key in extra else "")
+             for key in columns],
+            fontsize=7, rotation=45 if len(columns) > 3 else 0,
+            ha="right" if len(columns) > 3 else "center",
+        )
+        ax.set_xlim(-0.6, len(columns) - 0.4)
+        ax.set_xlabel("input / loss", fontsize=8, color=MUTED)
+        ax.set_title(f"{_short(arch)}\nvs {other.removeprefix('amass_')}", fontsize=9, color=INK)
+    axes[0][0].set_ylabel(TITLES.get(metric, metric), fontsize=8, color=MUTED)
+
+    path = HERE / "baselines.json"
+    if path.exists():
+        for name, entry in json.loads(path.read_text()).items():
+            value = entry.get(metric)
+            if name in HIDDEN_BASELINES or value is None or value > axes[0][0].get_ylim()[1]:
+                continue
+            for ax in axes[0]:
+                ax.axhline(value, color=MUTED, linewidth=1, linestyle="--", zorder=0)
+            axes[0][0].annotate(
+                name, (0, value), xycoords=("axes fraction", "data"),
+                textcoords="offset points", xytext=(2, 3), ha="left", fontsize=7, color=MUTED,
+                bbox={"facecolor": SURFACE, "edgecolor": "none", "pad": 1},
+            )
+
+    handles, labels = [], []
+    for ax in axes[0]:
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            if label not in labels:
+                handles.append(handle)
+                labels.append(label)
+    fig.legend(handles, labels, loc="outside lower center", ncols=len(labels), frameon=False,
+               fontsize=8)
+    return _save(fig, f"{metric}_corpora.png")
+
+
+def figures(df: pl.DataFrame, metric: str) -> list[str]:
+    """The three figures for one metric, as markdown, skipping any the data cannot fill."""
+
+    made = [
+        ("Each matrix on its own color scale", fig_matrix(df, metric)),
+        ("What each axis buys, per architecture", fig_ladder(df, metric)),
+        ("Corpus against corpus, cell by cell", fig_corpora(df, metric)),
+    ]
+    lines = []
+    for caption, path in made:
+        if path:
+            lines += [f"![{caption}]({path})", "", f"*{caption}.*", ""]
+    return lines
+
+
+def tables(df: pl.DataFrame) -> str:
+    corpora = sorted(df["corpus"].unique())
+    parts = [
+        f"*{len(df)} cells across {len(corpora)} corpora and "
+        f"{df['arch'].n_unique()} architectures. Regenerate with `gen.py`.*",
+        "",
+        *(
+            [f"*Held out of this report: {', '.join(f'`{c}`' for c in sorted(EXCLUDE_CORPORA))}. "
+             "The runs exist; `EXCLUDE_CORPORA` in `gen.py` is what drops them.*", ""]
+            if EXCLUDE_CORPORA
+            else []
+        ),
+        "*An architecture whose name carries an objective suffix (`_jepa`, `_simmim`) was "
+        "pretrained with that objective; an unsuffixed one is the MAE baseline. JEPA has no "
+        "reconstruction target, so its sections tabulate the input axis alone and it cannot "
+        "speak to the loss-channel axis at all.*",
+        "",
+        "*In the matrices, the percentage beside each cell is its relative difference from "
+        "the best cell of that table: `(cell - best) / best`. It is within-table only, so it "
+        "compares cells to each other and never across corpora or architectures.*",
+        "",
+    ]
+
+    for metric in REPORTED:
+        parts += [f"## {TITLES.get(metric, metric)}", ""]
+        # Figures first: they are the same numbers as the tables under them, read at a
+        # glance rather than cell by cell.
+        parts += figures(df, metric)
+        for corpus in corpora:
+            for arch in sorted(df.filter(pl.col("corpus") == corpus)["arch"].unique()):
+                subset = df.filter((pl.col("corpus") == corpus) & (pl.col("arch") == arch))
+                runs = subset.group_by("cell").len()["len"].max()
+                label = f"{runs} seeds" if runs > 1 else "1 seed, no error bar"
+                axes = "" if has_loss_axis(subset) else ", input axis only"
+                parts += [
+                    f"### `{corpus}` / {arch} ({label}{axes})", "", matrix(subset, metric), "",
+                ]
+
+        # Only meaningful against a reference corpus; the first alphabetically is the
+        # AMASS-only baseline every later corpus adds to.
+        if len(corpora) > 1:
+            base = corpora[0]
+            for other in corpora[1:]:
+                # Per architecture, and only where both corpora have it: a corpus-to-corpus
+                # delta that averaged medium over thindec would be reporting the decoder
+                # ablation as a data effect.
+                shared = sorted(
+                    set(df.filter(pl.col("corpus") == base)["arch"])
+                    & set(df.filter(pl.col("corpus") == other)["arch"])
+                )
+                for arch in shared:
+                    table, note = delta(df, base, other, arch, metric)
+                    parts += [
+                        f"### Delta, `{other}` − `{base}` ({arch})", "", table, "", note, "",
+                    ]
+
+    parts += rankability(df, REPORTED[0])
+    parts += marginals(df, REPORTED[0])
+    parts += ["## Best cell per corpus", "", best_cells(df), ""]
+
+    # Seed spread is the number every cell-to-cell and corpus-to-corpus claim has to clear.
+    # Reported per (corpus, arch) rather than per cell so it is one number to compare
+    # against, and pooled across cells because each cell has too few replicates alone.
+    replicated = df.filter(pl.col("replicate") != "")
+    if len(replicated):
+        parts += ["## Replicate spread", ""]
+        spread = (
+            df.group_by("corpus", "arch", "cell")
+            .agg(pl.len().alias("n"), *[pl.col(m).std().alias(f"sd_{m}") for m in REPORTED])
+            .filter(pl.col("n") > 1)
+            .group_by("corpus", "arch")
+            .agg(
+                pl.col("n").max().alias("runs_per_cell"),
+                pl.len().alias("cells"),
+                *[pl.col(f"sd_{m}").mean().alias(f"sd_{m}") for m in REPORTED],
+            )
+            .sort("corpus", "arch")
+        )
+        parts += [
+            "| corpus | arch | runs/cell | cells | " + " | ".join(f"sd {m}" for m in REPORTED) + " |",
+            "| :--- | :--- | ---: | ---: |" + " ---: |" * len(REPORTED),
+            *(
+                f"| {r['corpus']} | {r['arch']} | {r['runs_per_cell']} | {r['cells']} | "
+                + " | ".join(f"{r[f'sd_{m}']:.4f}" for m in REPORTED)
+                + " |"
+                for r in spread.iter_rows(named=True)
+            ),
+            "",
+        ]
+    parts += reference_points(df)
+
+    parts += ["## Provenance", ""]
+    # Grouped by statistics file rather than listed per run: when replicates of one corpus
+    # were normalized differently, that is the thing to notice, and a bare list of two
+    # filenames under one corpus does not say which replicate used which.
+    provenance = (
+        df.group_by("corpus", "arch", "normalization")
+        .agg(pl.col("replicate").unique().sort().str.join(", ").alias("replicates"))
+        .sort("corpus", "arch", "normalization")
+    )
+    parts += [
+        "| corpus | arch | replicates | normalization |",
+        "| :--- | :--- | :--- | :--- |",
+        *(
+            f"| {r['corpus']} | {r['arch']} | {r['replicates'] or 'canonical'} | `{r['normalization']}` |"
+            for r in provenance.iter_rows(named=True)
+        ),
+        "",
+    ]
+    return "\n".join(parts)
+
+
+def splice(readme: Path, generated: str) -> None:
+    """Replace the generated block, leaving hand-written prose untouched."""
+
+    block = f"{BEGIN}\n\n{generated}\n{END}"
+    if readme.exists() and BEGIN in readme.read_text():
+        text = readme.read_text()
+        head, _, rest = text.partition(BEGIN)
+        _, _, tail = rest.partition(END)
+        readme.write_text(head + block + tail)
+    else:
+        readme.write_text(f"# {BENCHMARK}\n\n{block}\n")
+
+
+def main() -> None:
+    df = collect().filter(~pl.col("corpus").is_in(list(EXCLUDE_CORPORA))).sort(
+        "corpus", "arch", "input", "loss"
+    )
+    df.write_csv(HERE / "metrics.csv")
+    splice(HERE / "README.md", tables(df))
+    print(f"{len(df)} cells -> {HERE / 'metrics.csv'} and README.md")
+
+
+if __name__ == "__main__":
+    main()

@@ -40,6 +40,7 @@ from torchmetrics.classification import MultilabelAveragePrecision
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from moments_baseline import moments  # noqa: E402
+from probe_baseline_mae import BaselineBackbone, load_pretrained  # noqa: E402
 
 from sometria.architecture.encoder import MotionTransformerEncoder, EncoderSpec, load_encoder
 from sometria.downstream.dataset import LabelledMotionDataModule
@@ -48,7 +49,18 @@ from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAverageP
 
 #: Neighbour counts scored in one pass. The distances are computed once, so the sweep is
 #: nearly free and every source is read at the same set of k.
-NEIGHBOURS = (1, 5, 10, 20, 50)
+#:
+#: The tail past 50 is not padding. On the MAE matrix the old grid `(1, 5, 10, 20, 50)` was
+#: censored on every cell tried: macro mAP rose monotonically to the last candidate
+#: (0.1538 / 0.2888 / 0.3235 / 0.3388 / 0.3502 on `in_pkd__loss_p`), so the reported number
+#: was the grid edge rather than an optimum -- the same failure
+#: `classifier_convex.DEFAULT_WEIGHT_DECAYS` records for its own grid, and for the same
+#: reason: a multi-label target with ~2 of 60 labels a window needs many neighbours before
+#: the weighted vote has anything to rank.
+#:
+#: Results under the old grid are not comparable to results under this one wherever the old
+#: sweep hit its edge, which on this matrix is everywhere.
+NEIGHBOURS = (1, 5, 10, 20, 50, 100, 200, 500)
 
 #: Softmax temperature on cosine similarity, the standard SSL kNN evaluation weighting
 #: (Wu et al. 2018, as used by MoCo and DINO). Without a weighting, k=1 predicts a hard
@@ -90,11 +102,25 @@ def source_features(name: str, config, device: str, encoder: str = "backbone"):
     parts = checkpoint.resolve().parts
     run = parts[parts.index("lightning_logs") - 1] if "lightning_logs" in parts else checkpoint.stem
 
-    # Defaults to "backbone", which is what a masked objective stores. A JEPA checkpoint
-    # holds "student." and "teacher." instead and has no backbone at all, so it needs
-    # --encoder teacher rather than a silent fallback to whichever prefix happens to
-    # match: which of the two is the representation is the caller's decision.
-    return encoder_features(load_encoder(str(checkpoint), encoder), device), run
+    # Two encoder implementations live in this repo, and the pretraining matrix uses the
+    # other one. `load_encoder` rebuilds an `architecture.MotionTransformerEncoder` from an
+    # `EncoderSpec` carried in the checkpoint's hparams; `models.baseline.MAE` and its
+    # siblings build a `baseline.Encoder` from flat constructor arguments and carry no spec
+    # at all, so `runs/pretrain/**` cannot be read that way -- it fails as
+    # `KeyError: 'backbone'` inside `load_encoder`. The two classes are not weight
+    # compatible, so this dispatches rather than converting.
+    #
+    # The baseline branch is the `BaselineBackbone` adapter every other probe in this matrix
+    # already goes through, and it exposes the one method `encoder_features` calls.
+    # `load_pretrained` picks the objective off the state-dict prefix, so MAE, SimMIM and
+    # JEPA all arrive here the same way -- and `--encoder` is not consulted on that branch,
+    # because JEPA's own `encode` already reads its EMA teacher.
+    hparams = t.load(checkpoint, map_location="cpu", weights_only=False)["hyper_parameters"]
+    if hparams.get("spec") or hparams.get("backbone"):
+        backbone = load_encoder(str(checkpoint), encoder)
+    else:
+        backbone = BaselineBackbone(load_pretrained(checkpoint))
+    return encoder_features(backbone, device), run
 
 
 @t.no_grad()
