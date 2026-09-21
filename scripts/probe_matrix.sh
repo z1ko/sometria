@@ -75,6 +75,15 @@ SUFFIX=""
 #   REPEATS="1 2 3" ./scripts/probe_matrix.sh      re-probe the canonical run three times
 SEEDS=${SEEDS:-}
 REPEATS=${REPEATS:-}
+
+# Which cells to probe, as a glob over the pretraining tree. It used to live only in
+# finetune_matrix.sh, on the grounds that a probe was cheap enough to always sweep
+# everything -- which stopped being true with babel_60_official, where the point is three
+# named cells rather than a ranking.
+#
+#   CELLS="in_pk__loss_pv" ./scripts/probe_matrix.sh
+#   CELLS="in_pk__loss_pv in_p__loss_pk in_p__loss_p" ./scripts/probe_matrix.sh
+CELLS=${CELLS:-in_*}
 if [ -z "$SEEDS" ]; then seeds=(""); else read -ra seeds <<< "$SEEDS"; fi
 if [ -z "$REPEATS" ]; then repeats=(""); else read -ra repeats <<< "$REPEATS"; fi
 
@@ -121,6 +130,7 @@ echo "normalize  $NORMALIZATION"
 echo "arch       $ARCH"
 echo "objective  $OBJECTIVE"
 echo "epochs     $EPOCHS"
+echo "cells      $CELLS"
 echo "seeds      ${SEEDS:-<canonical pretraining run>}"
 echo "repeats    ${REPEATS:-<none, probe seed from config>}"
 echo "split set  ${SPLIT_SET:-<from $CONFIG>}"
@@ -140,9 +150,10 @@ for seed in "${seeds[@]}"; do
         out_root="$OUT${seed:+/seed$seed}${repeat:+/rep$repeat}"
         [ -n "$seed$repeat" ] && echo "== ${seed:+seed $seed }${repeat:+repeat $repeat }-> $out_root"
 
-        # `in_*`, not `in_*__loss_*`: it matches both naming schemes, since a cell without
-        # a loss axis is named for its input channels alone.
-        for dir in "$source_root"/in_*; do
+        # The default `in_*`, not `in_*__loss_*`: it matches both naming schemes, since a
+        # cell without a loss axis is named for its input channels alone.
+        for pattern in $CELLS; do
+        for dir in "$source_root"/$pattern; do
             [ -d "$dir" ] || continue
             found=$((found + 1))
             name=$(basename "$dir")
@@ -171,7 +182,8 @@ for seed in "${seeds[@]}"; do
                 ${SPLIT_SET:+"dataloader.val.split_set=$SPLIT_SET"} \
                 ${repeat:+"training.seed=$repeat"}
         done
+        done
     done
 done
 
-[ "$found" -gt 0 ] || { echo "no in_* cells under $PRETRAIN" >&2; exit 1; }
+[ "$found" -gt 0 ] || { echo "no cell matching $CELLS under $PRETRAIN" >&2; exit 1; }

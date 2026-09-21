@@ -53,7 +53,11 @@ from torchmetrics.classification import MultilabelAveragePrecision, MultilabelF1
 
 from sometria.downstream.dataset import LabelledMotionDataModule
 from sometria.downstream.labels import load_label_vocabulary_index
-from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAveragePrecision
+from sometria.downstream.metrics import (
+    MultilabelTop1Norm,
+    MultilabelTopKRecall,
+    WindowMeanAveragePrecision,
+)
 from sometria.downstream.segmentation import best_boundary_f1, boundary_f1
 
 
@@ -177,6 +181,20 @@ def train_head(
     return head
 
 
+def metric_set(num_labels: int) -> dict:
+    """A fresh metric per call: they are stateful, so a subset cannot reuse the objects."""
+
+    return {
+        "val/macro_map": WindowMeanAveragePrecision(num_labels=num_labels),
+        "val/micro_map": MultilabelAveragePrecision(num_labels=num_labels, average="micro"),
+        "val/macro_f1s": MultilabelF1Score(num_labels=num_labels, threshold=0.5, average="macro"),
+        "val/top_1_norm": MultilabelTop1Norm(num_labels=num_labels),
+        "val/top_1_rec": MultilabelTopKRecall(top_k=1),
+        "val/top_3_rec": MultilabelTopKRecall(top_k=3),
+        "val/top_5_rec": MultilabelTopKRecall(top_k=5),
+    }
+
+
 @t.no_grad()
 def evaluate(
     head: nn.Module,
@@ -185,34 +203,43 @@ def evaluate(
     device: str,
     *,
     patches: int | None = None,
+    row_subsets: dict[str, t.Tensor] | None = None,
 ) -> dict:
     """The probe's metric set, so the numbers land in the same units as its own.
 
     For a segmentation target the rows are ``(window, patch)`` pairs, which is what
     :class:`~sometria.downstream.segmentation.MotionSegmenter` scores too -- plus
     ``boundary_f1s``, which only exists once a prediction can change within a window.
+
+    ``row_subsets`` mirrors the probe's, so the floor carries the same gate the probe
+    reports and the two stay readable side by side.
     """
 
     x, y = validation
     head.eval()
     logits = head(x.to(device)).cpu()
 
-    metrics = {
-        "val/macro_map": WindowMeanAveragePrecision(num_labels=num_labels),
-        "val/micro_map": MultilabelAveragePrecision(num_labels=num_labels, average="micro"),
-        "val/macro_f1s": MultilabelF1Score(num_labels=num_labels, threshold=0.5, average="macro"),
-        "val/top_1_rec": MultilabelTopKRecall(top_k=1),
-        "val/top_3_rec": MultilabelTopKRecall(top_k=3),
-        "val/top_5_rec": MultilabelTopKRecall(top_k=5),
-    }
+    def score(rows: t.Tensor | None = None) -> dict[str, float]:
+        predictions, target = (logits, y) if rows is None else (logits[rows], y[rows])
+        return {
+            name: float(metric(predictions, target.int()))
+            for name, metric in metric_set(num_labels).items()
+        }
+
     if patches is None:
-        return {name: float(metric(logits, y.int())) for name, metric in metrics.items()}
+        scores = score()
+        for subset, mask in (row_subsets or {}).items():
+            scores[f"val/{subset}_rows"] = float(mask.sum())
+            if bool(mask.any()):
+                scores |= {
+                    f"val/{subset}_{name.removeprefix('val/')}": value
+                    for name, value in score(mask).items()
+                }
+        return scores
 
     shaped = logits.unflatten(0, (-1, patches))
-    scores = {
-        name: float(metric(logits, y.int())) for name, metric in metrics.items()
-    }
     shaped_y = y.unflatten(0, (-1, patches))
+    scores = score()
     scores["val/boundary_f1s"] = float(boundary_f1(shaped, shaped_y))
     scores["val/boundary_best_f1s"] = float(best_boundary_f1(shaped, shaped_y))
     return scores
@@ -302,7 +329,18 @@ def main() -> None:
                 device=device,
             )
             results[name] = evaluate(
-                head, held_out, num_labels, device, patches=patches if patches else None
+                head,
+                held_out,
+                num_labels,
+                device,
+                patches=patches if patches else None,
+                # Present only under BABEL's chunk protocol; None everywhere else.
+                row_subsets=(
+                    {"unlooped": mask}
+                    if variant == "window"
+                    and (mask := getattr(data.val_dataset, "unlooped_rows", None)) is not None
+                    else None
+                ),
             )
 
     print(f"\n=== moments + linear, {arguments.config.name}, {arguments.passes} passes ===")

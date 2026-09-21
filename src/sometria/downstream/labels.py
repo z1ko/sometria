@@ -10,6 +10,12 @@ duplicates a *k*-label segment into *k* samples, capping such a chunk at 50% Top
 Comparability with published BABEL numbers is given up on purpose, in exchange for a
 loss with no ceiling and a downstream path that reuses the pretraining one.
 
+That trade is still the default and still the one the ranking tables are built on. It is
+no longer the only thing on offer: :func:`load_label_spans` and
+:class:`~sometria.downstream.dataset.LabelledSpanChunks` reproduce their protocol exactly,
+for the one table that has to sit next to their published numbers. Two protocols, on
+purpose, never mixed in one table.
+
 Labels outside the chosen vocabulary contribute nothing, so a window covering only
 out-of-scope segments -- ``transition`` is 19% of rows and has no index at all -- trains
 as an all-negative example rather than being dropped. Dropping would bias evaluation
@@ -100,6 +106,63 @@ def load_label_segments(
         )
     }
     return segments, num_labels
+
+
+def load_label_spans(
+    root: str | Path,
+    *,
+    label_set: str,
+    sample_ids: list[str] | None = None,
+) -> tuple[dict[str, np.ndarray], int]:
+    """BABEL's own segment set, for the chunk protocol: the same shape, a different rule.
+
+    :func:`load_label_segments` unions the frame-level and sequence-level spans because a
+    window is scored by coverage and a sample with only sequence labels would otherwise
+    train as all-negative. BABEL's ``create_dataset.py`` does something else: per sequence
+    it takes ``frame_ann`` if the annotator produced one *at all*, and falls back to
+    ``seq_ann`` otherwise, never both. A fallback sequence label is then stretched to
+    ``0..dur`` and chunked across the whole take, so 39% of ``babel_official/val``'s
+    samples reach their benchmark with no temporal localization -- a property their README
+    does not mention and their released labels do not record.
+
+    The fallback turns on whether a *frame annotation exists*, not on whether it survives
+    the vocabulary: their test is ``ann['frame_ann'] is not None``, evaluated before any
+    ``act_cat`` filtering. A sample whose frame spans are all out-of-vocabulary therefore
+    contributes nothing, rather than falling back to its sequence label.
+    """
+
+    vocabulary, num_labels = load_label_vocabulary_index(root, label_set)
+    ontology = vocabulary["ontology"][0]
+
+    annotations = load_annotations(root).filter(
+        pl.col("start_t").is_not_null() & pl.col("end_t").is_not_null()
+    )
+    if sample_ids is not None:
+        annotations = annotations.filter(pl.col("sample_id").is_in(sample_ids))
+
+    framed = (
+        annotations.filter(pl.col("label_type") == "frame")["sample_id"].unique().to_list()
+    )
+    joined = (
+        annotations.filter(pl.col("ontology") == ontology)
+        .join(vocabulary.select("label", "label_index"), on="label", how="inner")
+        .filter(
+            pl.when(pl.col("sample_id").is_in(framed))
+            .then(pl.col("label_type") == "frame")
+            .otherwise(pl.col("label_type") == "sequence")
+        )
+        .select("sample_id", "start_t", "end_t", "label_index")
+    )
+
+    spans = {
+        sample_id: np.asarray(rows, dtype=np.float32).reshape(-1, 3)
+        for sample_id, rows in (
+            joined.group_by("sample_id")
+            .agg(pl.concat_list("start_t", "end_t", "label_index").flatten())
+            .iter_rows()
+        )
+    }
+    return spans, num_labels
 
 
 def annotated_sample_ids(

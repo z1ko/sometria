@@ -26,7 +26,11 @@ from torchmetrics.classification import MultilabelAveragePrecision, MultilabelF1
 
 from sometria.architecture.encoder import MotionTransformerEncoder
 from sometria.architecture.scheduler import lr_schedule
-from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAveragePrecision
+from sometria.downstream.metrics import (
+    MultilabelTop1Norm,
+    MultilabelTopKRecall,
+    WindowMeanAveragePrecision,
+)
 from sometria.downstream.pooling import get_pooler
 
 
@@ -65,13 +69,14 @@ class MotionLinearClassifier(L.LightningModule):
             nn.Linear(self.pooler.out_dim, num_labels),  # type: ignore
         )
 
-        # macro-mAP, micro-mAP, macro-F1, top 1/3/5 recall
+        # macro-mAP, micro-mAP, macro-F1, top 1/3/5 recall, BABEL's Top-1-norm
         self.val_macro_map = WindowMeanAveragePrecision(num_labels=num_labels)
         self.val_micro_map = MultilabelAveragePrecision(num_labels=num_labels, average="micro")
         self.val_macro_f1s = MultilabelF1Score(num_labels=num_labels, threshold=0.5, average="macro")
         self.val_top_1_rec = MultilabelTopKRecall(top_k=1)
         self.val_top_3_rec = MultilabelTopKRecall(top_k=3)
         self.val_top_5_rec = MultilabelTopKRecall(top_k=5)
+        self.val_top_1_norm = MultilabelTop1Norm(num_labels=num_labels)
 
         self.loss = nn.BCEWithLogitsLoss()
 
@@ -114,6 +119,7 @@ class MotionLinearClassifier(L.LightningModule):
             ("top_1_rec", self.val_top_1_rec, False),
             ("top_3_rec", self.val_top_3_rec, False),
             ("top_5_rec", self.val_top_5_rec, False),
+            ("top_1_norm", self.val_top_1_norm, False),
         ):
             metric.update(logits, targets)
             self.log(f"val/{name}", metric, prog_bar=prog_bar, on_epoch=True, batch_size=batch_size)

@@ -107,6 +107,13 @@ def run_probe(config, checkpoint: Path, device: str) -> dict:
         # from the same model -- the exclusion is an averaging choice, not a data filter.
         # Empty means "our mAP numbers only", which is right for BABEL's multi-hot targets.
         f1_subsets=[list(subset) for subset in config.training.get("f1_label_subsets", [])],
+        # Only LabelledSpanChunks has one, so this is empty on every protocol but BABEL's
+        # own. Positional, and safe because the validation loader never shuffles.
+        row_subsets=(
+            {"unlooped": mask}
+            if (mask := getattr(datamodule.val_dataset, "unlooped_rows", None)) is not None
+            else None
+        ),
     )
     return {
         "weight_decay": best_wd,

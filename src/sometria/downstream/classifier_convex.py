@@ -20,7 +20,11 @@ from collections.abc import Iterable, Sequence
 import torch as t
 import torch.nn as nn
 
-from sometria.downstream.metrics import MultilabelTopKRecall, WindowMeanAveragePrecision
+from sometria.downstream.metrics import (
+    MultilabelTop1Norm,
+    MultilabelTopKRecall,
+    WindowMeanAveragePrecision,
+)
 from sometria.downstream.pooling import get_pooler
 from torchmetrics.classification import MultilabelAveragePrecision, MultilabelF1Score
 
@@ -175,6 +179,10 @@ def score_predictions(scores: t.Tensor, targets: t.Tensor) -> dict[str, float]:
         "macro_map": WindowMeanAveragePrecision(num_labels=num_labels),
         "micro_map": MultilabelAveragePrecision(num_labels=num_labels, average="micro"),
         "macro_f1s": MultilabelF1Score(num_labels=num_labels, threshold=0.5, average="macro"),
+        # BABEL's own headline number. It only means what their table means when the rows
+        # are their chunks -- see sometria.downstream.dataset.LabelledSpanChunks -- but it
+        # costs nothing to report everywhere the other three are reported.
+        "top_1_norm": MultilabelTop1Norm(num_labels=num_labels),
     }
     # A vocabulary can be smaller than the recall ladder: topk(k=5) over a 3-way head is a
     # RuntimeError, and topk(k=3) there is 1.0 by construction. Ask only what the head can
@@ -283,6 +291,7 @@ class MotionConvexClassifier(nn.Module):
         device: str,
         by_sample: bool,
         f1_subsets: Sequence[Sequence[int]] = (),
+        row_subsets: dict[str, t.Tensor] | None = None,
     ) -> dict[str, float]:
         """Head, optional take-pooling, metrics. Shared by :meth:`evaluate` and :meth:`sweep`.
 
@@ -290,11 +299,28 @@ class MotionConvexClassifier(nn.Module):
         side by side: mAP ranks, so it pools mean probabilities; the paper's macro F1 needs a
         hard label, so it pools by majority vote. Voting first would destroy the ranking mAP
         scores, and averaging first would not be the published protocol.
+
+        ``row_subsets`` re-scores a named mask over the same rows and prefixes the result,
+        e.g. ``unlooped_macro_map`` from
+        :attr:`~sometria.downstream.dataset.LabelledSpanChunks.unlooped_rows`. The mask is
+        positional, so it holds only because the validation loader does not shuffle. It is
+        ignored under ``by_sample``, where a row is a take rather than a window and there is
+        nothing left for a per-window mask to index.
         """
 
         logits = self.head(feats.to(device)).cpu()
         if not by_sample:
-            return score_predictions(logits, labels.int())
+            metrics = score_predictions(logits, labels.int())
+            for name, mask in (row_subsets or {}).items():
+                metrics[f"{name}_rows"] = float(mask.sum())
+                if bool(mask.any()):
+                    metrics |= {
+                        f"{name}_{key}": value
+                        for key, value in score_predictions(
+                            logits[mask], labels[mask].int()
+                        ).items()
+                    }
+            return metrics
 
         probabilities = logits.sigmoid()
         scores, targets = pool_by_sample(probabilities, labels, sample_ids)
@@ -309,11 +335,14 @@ class MotionConvexClassifier(nn.Module):
         device: str = "cpu",
         by_sample: bool = False,
         f1_subsets: Sequence[Sequence[int]] = (),
+        row_subsets: dict[str, t.Tensor] | None = None,
     ) -> dict[str, float]:
         """The same numbers :class:`MotionLinearClassifier` logs under ``val/*``."""
 
         feats, labels, sample_ids = extract_features(self.backbone, self.pooler, self.norm, loader, device)
-        return self.score_features(feats, labels, sample_ids, device, by_sample, f1_subsets)
+        return self.score_features(
+            feats, labels, sample_ids, device, by_sample, f1_subsets, row_subsets
+        )
 
     def sweep(
         self,
@@ -326,6 +355,7 @@ class MotionConvexClassifier(nn.Module):
         train_passes: int = DEFAULT_TRAIN_PASSES,
         by_sample: bool = False,
         f1_subsets: Sequence[Sequence[int]] = (),
+        row_subsets: dict[str, t.Tensor] | None = None,
     ) -> tuple[float, dict[str, float], dict[float, dict[str, float]]]:
         """Refit the head for each candidate ``weight_decay``, picking by ``macro_map``.
 
@@ -351,7 +381,11 @@ class MotionConvexClassifier(nn.Module):
             self.weight_decay = wd
             self._fit_features(train_feats, train_labels, max_iter, tol)
 
-            metrics = self.score_features(val_feats, val_labels, val_ids, device, by_sample, f1_subsets)
+            # Selection reads `macro_map` only, so a row subset is reported and never
+            # selected on -- the gate is a diagnostic, not a second objective.
+            metrics = self.score_features(
+                val_feats, val_labels, val_ids, device, by_sample, f1_subsets, row_subsets
+            )
             results[wd] = metrics
 
             if best_metrics is None or metrics["macro_map"] > best_metrics["macro_map"]:
@@ -401,7 +435,9 @@ if __name__ == "__main__":
     assert after < before, f"L-BFGS did not improve loss: {before} -> {after}"
 
     metrics = clf.evaluate(_batches(5))
-    assert set(metrics) == {"macro_map", "micro_map", "macro_f1s", "top_1_rec", "top_3_rec", "top_5_rec"}
+    assert set(metrics) == {
+        "macro_map", "micro_map", "macro_f1s", "top_1_norm", "top_1_rec", "top_3_rec", "top_5_rec"
+    }
     print("ok (fit/evaluate):", metrics)
 
     best_wd, best_metrics, results = clf.sweep(train_batches, _batches(5), weight_decays=(1e-1, 1e-3, 1e-5))
@@ -446,5 +482,5 @@ if __name__ == "__main__":
 
     # a vocabulary smaller than the recall ladder must not ask for topk(5) over 3 columns
     narrow = score_predictions(t.randn(16, 3), (t.rand(16, 3) > 0.5).int())
-    assert set(narrow) == {"macro_map", "micro_map", "macro_f1s", "top_1_rec"}, narrow
+    assert set(narrow) == {"macro_map", "micro_map", "macro_f1s", "top_1_norm", "top_1_rec"}, narrow
     print("ok (narrow vocabulary):", narrow)
