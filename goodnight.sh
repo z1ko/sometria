@@ -1,30 +1,40 @@
 #!/usr/bin/env bash
-# Overnight: extra pretraining seeds for amass_motionx_clean/medium_100ep, probe them all,
-# regenerate the results summary.
+# Overnight: the two axes MAE has finished and the other objectives have not, plus the
+# first half of evaluation-plan phase 2. No pretraining -- every backbone exists.
 #
-#   bash goodnight.sh                # SEEDS defaults to "1 2"
-#   SEEDS=1 bash goodnight.sh        # one seed, ~12h, fits a single night
-#   DRY=1 bash goodnight.sh          # print the plan and exit
+#   bash goodnight.sh                     # all three stages
+#   DRY=1 bash goodnight.sh               # print the plan and exit
+#   STAGES="3" bash goodnight.sh          # a subset, by the numbers below
+#   MASKS="random suffix" bash goodnight.sh   # see stage 3
 #
-# This is the run that decides the MotionX question. amass_clean already has three seeds
-# and sigma = 0.0025; MotionX has one, which is why every corpus delta in
-# results/probe/babel_60_convex/README.md is marginal at best.
+# Where the core matrix stands (128 backbones: amass_clean x MAE 16x4, JEPA 4x4,
+# SimMIM 16x3). Both window probes are complete at 128/128. Segmentation, geometry, kNN
+# and label-efficiency are complete for MAE at 64/64 and empty for the other two.
+# Reconstruction has 10 runs, all suffix, all seed2, all on the pre-`pv` cell set.
 #
-#   SEEDS=1    -> n=3 vs n=2, SE 0.0023, the observed +0.0069 becomes 3.0 sigma
-#   SEEDS="1 2"-> n=3 vs n=3, SE 0.0020, it becomes 3.4 sigma
+#   1. segmentation, JEPA      16 cells.
+#   2. segmentation, SimMIM    48 cells.
+#   3. reconstruction, suffix  54 cells.
 #
-# Bonferroni over the nine cells needs 2.77 sigma, so one extra seed already decides the
-# headline comparison. The second buys a sigma estimate for MotionX itself, which is
-# currently assumed equal to AMASS's and untested.
+# On stage 2, so it is on the record rather than a surprise in the table: SimMIM is below
+# the moments floor on all 16 window cells at 3 seeds, and below it again on the BABEL
+# chunk protocol at 0/16. The expected result here is that it is below the segmentation
+# floor too. That is worth 48 cells only as a published negative -- if you want the cheap
+# version, STAGES="1 3" skips it and costs nothing else.
 #
-# MotionX is ~3.4x the steps per epoch: 76 min per cell against 22 for amass_clean. Two
-# seeds is ~24h, not one night.
+# On stage 3, MASKS is `suffix` rather than the runner's own `"random suffix"` default.
+# Suffix is forecasting, random is reconstruction, and the plan specifies both as one rig
+# with one decoder. Widening it to both makes the stage 118 cells instead of 54 and is a
+# one-word edit here. Nothing downstream assumes one or the other.
 #
-# seed42 is the run that was already there, now filed under seed42/. The probe pass names
-# it so a deleted result gets redone, and skips it otherwise.
+# The decoder budget is 40 epochs and that is deliberate -- see the DECODER_EPOCHS comment
+# in scripts/reconstruction_matrix.sh, where 10 was measured to censor the metric. It also
+# means this stage has no measured per-cell wall time in this repo, so stage 3 is the one
+# that could run long. It is last for that reason: stages 1 and 2 land their pages first.
 #
-# Fails fast on purpose. Both matrix scripts skip work that is already on disk, so a
-# crashed run is resumed by re-running this file rather than needing a cleanup first.
+# Every runner checks the backbone's `done` marker itself and prints `UNFINISHED ...
+# skipping`, so there is no orphan preflight and nothing here deletes anything. Every step
+# skips work already on disk, so a crash is resumed by re-running this file.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -37,60 +47,51 @@ exec > >(tee -a "$LOG") 2>&1
 
 stage() { echo; echo "=== $* :: $(date '+%F %T')"; }
 
-stage "start"
-echo "log: $LOG"
-
-
-# The SMPL arm is not a matrix and the sweep scripts refuse it. Its features are 18
-# channels of rot6d with no torque, so the p/pk/pkd ladder -- indices into the 5-channel
-# OpenSim stack -- does not describe it. There is one configuration, pose in and pose out,
-# replicated over seeds, which is exactly how the MAE arm at
-# runs/pretrain/amass_smpl/medium_100ep/ was run. These stages mirror it.
-#
-# The cell name in the *probe* path is a label, not a swept axis: gen.py collects cells by
-# name, so `in_p` for an objective with no loss axis and `in_p__loss_p` for one with it
-# files these rows beside the MAE arm's.
-SMPL_STACK=(config/dataloader/amass_smpl.yaml)
-SMPL_NORM=stats/smpl_rot6d_log_vel_acc_v1/pretrain_paired_v1_train_clean.pt
-SMPL_SEED=${SMPL_SEED:-1}
-
-smpl_run() {   # objective  size-config  probe-cell-name
-    local objective=$1 size=$2 cell=$3
-    local out="runs/pretrain/amass_smpl/medium_100ep_${objective}/seed${SMPL_SEED}"
-    local probe="runs/probe/babel_60_convex/amass_smpl/medium_100ep_${objective}/seed${SMPL_SEED}/${cell}"
-
-    stage "pretrain amass_smpl medium_100ep_${objective} seed ${SMPL_SEED}"
-    if [ -e "$out/done" ]; then
-        echo "skip   $out"
-    else
-        uv run python train.py \
-            --config "config/pretrain_${objective}.yaml" "${SMPL_STACK[@]}" "$size" \
-            --output "$out" \
-            "training.epochs=100" "training.seed=${SMPL_SEED}"
-    fi
-
-    stage "probe amass_smpl medium_100ep_${objective} seed ${SMPL_SEED}"
-    if [ -e "$probe/metrics.json" ]; then
-        echo "skip   $probe"
-    else
-        uv run python scripts/probe_convex_mae.py \
-            --checkpoint "$out" \
-            --config config/experiment_linear_probe_smpl.yaml \
-            --output "$probe" \
-            "dataloader.normalization=${SMPL_NORM}"
-    fi
+maybe() {
+    if [ -n "${DRY:-}" ]; then printf '  %q' "$@"; printf '\n'; else "$@"; fi
 }
 
-smpl_run jepa   config/jepa/medium.yaml   in_p
-smpl_run simmim config/simmim/medium.yaml in_p__loss_p
+STAGES=${STAGES:-"1 2 3"}
+want() { case " $STAGES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
-# 42 first so an existing result is confirmed rather than assumed; it skips in seconds.
-# stage "probe amass_clean medium_100ep seeds 1 2"
-# OBJECTIVE=jepa CORPUS=amass_clean ARCH=medium EPOCHS=100 \
-#   SEEDS="1 2" ./scripts/probe_matrix.sh
-# 
-# stage "summarize"
-# uv run python results/probe/babel_60_convex/gen.py
-# 
-# stage "done"
-# echo "read: results/probe/babel_60_convex/README.md  (Replicate spread section)"
+# Seeds per objective: MAE and JEPA hold 1/2/3/42 on amass_clean, SimMIM only 1/2/42.
+JEPA_SEEDS=${JEPA_SEEDS:-"1 2 3 42"}
+SIMMIM_SEEDS=${SIMMIM_SEEDS:-"1 2 42"}
+RECON_SEEDS=${RECON_SEEDS:-"1 2 3 42"}
+MASKS=${MASKS:-suffix}
+
+stage "start"
+echo "log: $LOG"
+echo "stages: $STAGES   masks: $MASKS"
+
+
+if want 1; then
+    stage "1/3  segmentation -- JEPA seeds $JEPA_SEEDS"
+    OBJECTIVE=jepa SEEDS="$JEPA_SEEDS" ./scripts/segmentation_matrix.sh
+fi
+
+if want 2; then
+    stage "2/3  segmentation -- SimMIM seeds $SIMMIM_SEEDS"
+    OBJECTIVE=simmim SEEDS="$SIMMIM_SEEDS" ./scripts/segmentation_matrix.sh
+fi
+
+if want 1 || want 2; then
+    # The patch and window moments floors are already in baselines.json and the task has
+    # not changed, so they are not re-run.
+    stage "1-2/3  summarize segmentation"
+    maybe uv run python results/probe/babel_60_segmentation/gen.py
+fi
+
+
+if want 3; then
+    stage "3/3  reconstruction (masks: $MASKS) -- MAE seeds $RECON_SEEDS"
+    MASKS="$MASKS" SEEDS="$RECON_SEEDS" ./scripts/reconstruction_matrix.sh
+
+    stage "3/3  summarize reconstruction"
+    maybe uv run python results/reconstruction/gen.py
+fi
+
+
+stage "done"
+echo "read: results/probe/babel_60_segmentation/README.md  (does either objective move boundary F1?)"
+echo "      results/reconstruction/README.md               (against the zero- and constant-velocity floors)"
