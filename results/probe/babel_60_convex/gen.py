@@ -631,9 +631,9 @@ def fig_matrix(df: pl.DataFrame, metric: str) -> str | None:
     flattening the 0.345-0.367 MAE matrix into one uniform block; the levels are what
     the printed numbers and the ladder figure are for.
 
-    Each cell prints its shortfall against the best cell of its own panel, the same
-    number the README tables carry beside it, since the shade alone orders the cells
-    without saying how far apart they are.
+    Each cell prints its mean only, and each title the panel's range and pooled seed sd, so
+    how far apart two cells are reads against noise; the README tables carry the per-cell
+    sd and the shortfall from the best cell.
 
     Every (corpus, arch) that was probed gets a panel, including the ones with a single
     filled cell: the eight blanks around it are the point, since what a corpus has *not*
@@ -681,6 +681,9 @@ def fig_matrix(df: pl.DataFrame, metric: str) -> str | None:
         # Range in the title, since each panel carries its own scale and there is no
         # shared bar to read it off.
         extent = f"{lo:.3f} – {hi:.3f}" if hi > lo else f"{lo:.3f}, one cell"
+        sds = [sd for _, sd in means.values() if sd]
+        if sds:
+            extent += f" · seed sd {sum(sds) / len(sds):.3f}"
         ax.set_title(f"{corpus}\n{arch}\n{extent}", fontsize=9, color=INK)
         _style(ax)
         ax.spines["left"].set_visible(False)
@@ -696,14 +699,10 @@ def fig_matrix(df: pl.DataFrame, metric: str) -> str | None:
                 # Ink flips on the dark half of the ramp so the number stays readable
                 # in the strongest cells as well as the palest.
                 shade = INK if (mean - span[0]) / (span[1] - span[0]) < 0.55 else SURFACE
-                # Same shortfall the README tables print: against the best cell of this
-                # panel, which is also what the color ramp is normalized to, so the
-                # percentage and the shade are two readings of one number.
-                below = f"{(mean - hi) / hi:+.1%}"
-                ax.text(j, i - 0.1, f"{mean:.3f}", ha="center", va="center",
-                        fontsize=9, color=shade)
-                ax.text(j, i + 0.18, f"±{sd:.3f} ({below})" if sd else below,
-                        ha="center", va="center", fontsize=6.5, color=shade)
+                # Mean only. The shortfall-from-best the README tables print is what the
+                # ramp already shows, and per-cell sd is in the tables; one pooled sd sits
+                # in the title instead, so a cell reads as one number.
+                ax.text(j, i, f"{mean:.3f}", ha="center", va="center", fontsize=11, color=shade)
 
     # No colorbar: with a per-panel scale one bar would be wrong for every panel but the
     # one it was drawn from. Each panel's range is in its title instead.

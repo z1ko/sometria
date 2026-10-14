@@ -1,0 +1,480 @@
+% Requires: \usepackage{booktabs} and \usepackage{amsmath}
+% Every number is read from the generated block of a results/ README (2026-09-28):
+%   results/probe/babel_60_convex, results/probe/babel_60_official,
+%   results/probe/babel_60_segmentation, results/probe/carepd_updrs_convex,
+%   results/representation, results/reconstruction.
+% Correlations against probe mAP (Sec. exp-geometry, exp-reconstruction) were computed from
+% those folders' metrics.csv over the 16 amass_clean/medium_100ep cells, seed-averaged.
+% Regenerate the READMEs with each folder's gen.py before re-quoting anything here.
+
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate every pretrained backbone on the same battery of tests, in the order below. The
+first three measure action understanding on BABEL at increasing temporal resolution:
+window classification over tiled windows, single-action classification under BABEL's own
+protocol, and temporal segmentation. The fourth tests transfer to a clinical task, Parkinsonian gait severity on
+CARE-PD. The last three put no task head on the backbone at all. They measure the geometry
+of the features, retrieval by nearest neighbour, and how much of the raw signal the frozen
+tokens still hold, through reconstruction and forecasting.
+
+\subsection{Pretrained backbones}
+\label{sec:exp-backbones}
+
+\paragraph{Input representation.} Each frame gives every degree of freedom (DOF) five
+channels: the joint angle encoded as $(\sin\theta,\cos\theta)$, its first and second time
+derivatives $(\dot\theta,\ddot\theta)$, and the generalized joint torque $\tau$ from inverse
+dynamics. The body is the OpenSim model with its $43$ non-root DOFs; the six pelvis DOFs,
+which carry global translation and heading, are excluded. Windows are $240$ frames
+($4$\,s at $60$\,Hz), cut into patches of $8$ frames, so a window becomes a grid of
+$30 \times 43 = 1290$ tokens.
+
+\paragraph{The channel matrix.} We name nested channel sets by the channels they add:
+\textsf{p} $=\{\sin\theta,\cos\theta\}$, \textsf{pv} adds $\dot\theta$, \textsf{pk} adds
+$\ddot\theta$, and \textsf{pkd} adds $\tau$. A masked-reconstruction backbone is set by two
+choices on this ladder: the channels the encoder \emph{reads} (input axis) and the channels
+the loss \emph{scores} (loss axis). Crossing the two gives a $4\times4$ matrix of cells,
+written (input, loss). A step along either axis only ever adds channels.
+
+\paragraph{Objectives.} We pretrain three families with one encoder (a $6$-layer
+transformer, $d=256$, $8$ heads) at a masking ratio of $0.9$ for $100$ epochs.
+\textbf{MAE} reconstructs the masked tokens with a $3$-layer decoder. \textbf{SimMIM} has no
+decoder: a linear head regresses the masked tokens, each standardized per token.
+\textbf{JEPA} predicts the embedding an EMA teacher assigns to the masked tokens. JEPA has
+no reconstruction target, so it has an input axis only and gives four cells.
+
+\paragraph{Corpora.} The main corpus, \texttt{amass\_clean}, is AMASS converted to OpenSim
+kinematics and dynamics. A control corpus, \texttt{amass\_smpl}, keeps the same takes in
+SMPL's native parameterization: $21$ ball joints in a 6D rotation code, with no torque. It
+therefore fills only the \textsf{p} and \textsf{pv} rungs of the ladder. On
+\texttt{amass\_clean}, MAE and JEPA are pretrained with four seeds and SimMIM with three;
+on \texttt{amass\_smpl}, with two or three.
+
+\subsection{Evaluation principles}
+\label{sec:exp-principles}
+
+\paragraph{A convex probe.} Unless stated otherwise the backbone is frozen, its tokens are
+mean-pooled, and a single linear layer is fit to convergence with L-BFGS under a per-label
+binary cross-entropy. Each label is then a logistic regression over fixed features, so the
+fit has one global optimum and no learning rate, warmup, epoch budget or seed that could
+favour one backbone over another. The only hyperparameter is the weight decay, swept per
+cell over $10^{-1}$ to $10^{-6}$ and selected on validation macro mAP. Repeating the fit on
+one frozen backbone varies by $0.0008$ macro mAP, about a third of the spread between
+pretraining seeds, so the probe does not limit any comparison below.
+
+\paragraph{Floors.} Every task reports two references in its own units and on its own
+split. \emph{Chance} is computed exactly from the annotations: for average precision it is
+the class prevalence. The \emph{moments} baseline takes the mean, standard deviation,
+minimum and maximum of every DOF and channel over the window. That gives
+$43\times5\times4 = 860$ numbers, with no network and no pretraining, and they are fed to the
+same linear head. It reads the same data, labels, normalization and metrics as the probe;
+only its head is fit differently (AdamW, $40$ epochs, no weight-decay sweep), so if anything
+this floor is slightly under-tuned. The moments show how much of a score was available
+without learning a representation at all.
+
+\paragraph{Statistics.} Cells are compared against the pooled seed standard deviation
+$\sigma$ of their own matrix. Two tests guard against reading structure into noise. First,
+we ask whether a matrix can be ranked at all: $n$ identical cells still spread, so the
+observed range is compared with the expected range of $n$ Gaussian draws ($3.53\sigma$ for
+16 cells, $2.97\sigma$ for 9, $2.06\sigma$ for 4). Second, cells trained with the same seed
+share that seed's draw, so steps along an axis are tested \emph{paired} on the seed. They
+are then Bonferroni-corrected over every step and total in the table.
+
+\subsection{Window classification}
+\label{sec:exp-babel-tiled}
+
+\paragraph{Protocol.} BABEL-60 is multi-label classification over BABEL's $60$ most frequent
+action categories. We tile $4$\,s windows over each validation take and label each window
+with every category covering at least $15\%$ of it. That gives $4{,}936$ validation windows
+carrying $2.52$ labels each on average. Training windows are random crops, extracted over
+$20$ passes to recover augmentation. The primary metric is macro mAP, which weights every
+class equally. Micro mAP agrees with it almost everywhere (Spearman $+0.91$) and is not
+discussed further. Macro F1 is excluded: its fixed $0.5$ threshold makes it track the
+selected weight decay (Spearman $-0.71$), while macro mAP does not ($-0.03$).
+
+\paragraph{Results.} Table~\ref{tab:exp-babel} gives the best cell of each objective, and
+Table~\ref{tab:exp-ladder} the marginal level of each axis. The best MAE cell,
+$(\textsf{pk},\textsf{pv})$, reaches $0.3734$ macro mAP against $0.3303$ for the moments:
+$+0.043$, or $13\%$ relative. Chance is $0.0421$. Most of the distance from chance to the
+probe is therefore covered by summary statistics, and every comparison between backbones
+happens inside the remaining $13\%$.
+
+Inside that margin, the MAE matrix is structured and not noise: its range is $10.2\sigma$
+against a noise bar of $3.5\sigma$. The structure lies almost entirely on the loss axis.
+Adding velocity to the reconstruction target (\textsf{p}$\to$\textsf{pv}) buys $+0.0229$
+macro mAP (paired $p<0.001$). Adding acceleration on top of it \emph{costs} $0.0086$
+($p<0.001$), and adding torque changes nothing measurable ($+0.0012$, $p=0.054$). Along the
+input axis the whole ladder from \textsf{p} to \textsf{pkd} moves the score by $+0.0002$.
+What the encoder is asked to reconstruct matters; what it is given to read barely does.
+
+JEPA reaches $0.3433$ at its best cell, and unlike MAE it is best with the widest input
+($+0.048$ from \textsf{p} to \textsf{pkd}). Its seed spread is six times MAE's, however, and
+no single step survives correction.
+SimMIM is far below both, and its worst cell, $(\textsf{pkd},\textsf{p})$, reaches $0.1508$.
+This is not a failure of the probe. SimMIM's mean-pooled features are nearly rank-1
+(Section~\ref{sec:exp-geometry}), and SimMIM is known to be designed for fine-tuning
+rather than linear readout.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+& \multicolumn{2}{c}{window classif.} & \multicolumn{2}{c}{single-action classif.} & segmentation \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-6}
+& macro mAP & & macro mAP & Top-1-norm & macro mAP \\
+\midrule
+chance                         & 0.042 & & 0.023 & 0.017 & 0.042 \\
+moments                        & 0.330 & & 0.313 & 0.233 & 0.191 \\
+2s-AGCN, published (not matched) & ---   & & ---   & 0.240 & ---   \\
+\midrule
+MAE                            & \textbf{0.373} & & \textbf{0.378} & \textbf{0.281} & \textbf{0.308} \\
+JEPA                           & 0.343 & & 0.341 & 0.263 & 0.270 \\
+SimMIM                         & 0.303 & & 0.311 & 0.239 & 0.237 \\
+\midrule
+MAE over moments               & $+13\%$ & & $+21\%$ & $+21\%$ & $+62\%$ \\
+\bottomrule
+\end{tabular}
+\caption{Frozen-backbone convex probe on BABEL-60, \texttt{amass\_clean}. Each entry is
+the best cell of that objective's matrix on that column, averaged over pretraining seeds
+(four for MAE and JEPA, three for SimMIM). The best cell differs between columns, so the
+rows are an upper envelope and not one checkpoint. The moments column under ``segmentation''
+is the \textsc{patch} arm (Section~\ref{sec:exp-segmentation}). The 2s-AGCN row is BABEL's
+published cross-entropy baseline. It uses different inputs, a 5\,s chunk and the full
+validation set, and is a sanity check only.}
+\label{tab:exp-babel}
+\end{table}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llcccc}
+\toprule
+Measurement & axis & \textsf{p} & \textsf{pv} & \textsf{pk} & \textsf{pkd} \\
+\midrule
+window classification, macro mAP $\uparrow$  & loss  & 0.349 & \textbf{0.372} & 0.363 & 0.365 \\
+                                     & input & 0.360 & 0.365 & 0.364 & 0.360 \\
+single-action classification, macro mAP $\uparrow$ & loss  & 0.351 & \textbf{0.376} & 0.370 & 0.367 \\
+                                     & input & 0.361 & 0.367 & 0.366 & 0.369 \\
+temporal segmentation, macro mAP $\uparrow$ & loss  & 0.280 & \textbf{0.305} & 0.301 & 0.303 \\
+                                     & input & 0.294 & 0.298 & 0.300 & 0.297 \\
+\midrule
+reconstruction, degrees $\downarrow$ & loss  & 3.51 & 3.06 & \textbf{3.04} & 3.30 \\
+forecasting, degrees $\downarrow$    & loss  & 4.75 & \textbf{4.34} & 4.35 & 4.49 \\
+participation ratio                  & loss  & 16.6 & 19.5 & 18.0 & \textbf{23.7} \\
+\bottomrule
+\end{tabular}
+\caption{Marginal level of each axis of the MAE matrix on \texttt{amass\_clean}: each value
+averages the four cells sharing that rung of the axis and all four seeds. The
+\textsf{p}$\to$\textsf{pv} loss step is significant on all three classification benchmarks
+after Bonferroni correction (paired $p<0.001$ each: $+0.023$, $+0.025$, $+0.025$). No input
+step is.}
+\label{tab:exp-ladder}
+\end{table}
+
+\subsection{Single-action classification (BABEL protocol)}
+\label{sec:exp-babel-official}
+
+\paragraph{Protocol.} The tiled windows of Section~\ref{sec:exp-babel-tiled} span several annotated segments. BABEL's own
+benchmark instead cuts each chunk \emph{inside} a single annotated span and labels it with
+that span's categories. We reproduce their procedure with three of its details:
+\begin{itemize}
+\item frame-level spans are used wherever the annotator produced any, and sequence-level
+  spans otherwise, never both;
+\item there is no minimum duration;
+\item a span shorter than the chunk is looped to fill it.
+\end{itemize}
+The result is $8{,}152$ validation chunks carrying $1.37$ labels each. One deviation is
+forced: their chunk is $5$\,s and ours is $4$\,s, because $300$ frames do not divide into
+$8$-frame patches and the positional table is fit for $30$ time patches. We report macro mAP
+alongside BABEL's own class-averaged Top-1 (Top-1-norm).
+
+\paragraph{The loop gate.} Looping creates a shortcut. The loop period equals the span
+duration, and duration depends on the action category, so a model can score by timing the
+wrap rather than by recognizing the motion. We therefore rescore the $1{,}638$ chunks that
+contain no loop. Their macro mAP ranks the MAE matrix the same way the full benchmark does
+(Spearman $0.94$), so the ranking reflects motion. The absolute values are not comparable,
+because long spans have a different class mix.
+
+\paragraph{Results.} The pretrained backbone buys more over the moments here than on window
+classification: $+0.065$ macro mAP, or $21\%$, against $13\%$ (Table~\ref{tab:exp-babel}). Single-action
+classification is the less gameable of the two protocols. The top of the MAE matrix is a
+four-way tie: the \textsf{pv}-loss cells at every input width score $0.3734$ to $0.3783$, a
+span of $0.005$ against a per-cell seed spread of about $0.004$. Once again it is the loss
+axis that moves the benchmark: it spans $0.025$ between its best and worst levels, while
+the input axis spans $0.009$.
+
+The protocol separates the objectives more sharply than window classification does. All $16$ MAE
+cells beat the moments on macro mAP, one of four JEPA cells does, and \emph{none} of the
+$16$ SimMIM cells does. BABEL's own metrics are much coarser instruments. Against the
+moments, Top-1 puts the best MAE cell only $5.6\%$ ahead and the worst MAE cell $0.4\%$
+ahead, whereas macro mAP separates the same two cells by $20.7\%$ and $8.7\%$. Our best
+Top-1-norm, $0.281$, lies in the range of the published 2s-AGCN baseline ($0.24$). So does
+the moments floor ($0.233$), which is the more telling of the two facts.
+
+\subsection{Temporal segmentation}
+\label{sec:exp-segmentation}
+
+\paragraph{Protocol.} Window classification collapses time before the label is applied,
+and summary statistics are order-invariant, so neither can express a target that changes
+inside the window. We therefore resolve the target per time patch. Mean pooling runs over
+the DOF axis only, which leaves a $30\times d$ sequence: one row per $133$\,ms patch and
+thirty supervised rows per window. The same L-BFGS head is fit on those rows. Only
+frame-level annotations are used, because sequence-level spans cover the whole take and are
+constant across every window they touch. A patch is labelled by any category covering at
+least half of it. The validation split holds $3{,}669$ windows, and the target changes at
+$8.0\%$ of patch transitions.
+
+\paragraph{Metrics and floors.} Per-patch macro mAP is the ranking metric, and weight decay
+is selected on it alone. Boundary F1 scores only the transitions where the target changes;
+it is reported swept over thresholds, because a calibrated head on a $60$-way vocabulary
+keeps nearly every score below $0.5$. The moments baseline splits into two arms that
+bracket the task. The \textsc{patch} arm computes moments over each patch's own $8$ frames,
+so it has temporal resolution and no context. The \textsc{window} arm computes them over the
+whole window and broadcasts one prediction to every patch, so it has context and no temporal
+resolution. Boundary F1 has a second, binding floor: a predictor that claims a boundary at
+every transition scores recall $1$, precision $0.080$ and $\text{F1}=0.148$, with nothing
+fit at all.
+
+\paragraph{What is recognized improves most.} On per-patch macro mAP the best MAE cell
+reaches $0.308$ against $0.191$ for the \textsc{patch} moments: $+62\%$, where the same
+comparison was $+21\%$ on single-action and $+13\%$ on window classification
+(Table~\ref{tab:exp-babel}). The gain over arithmetic grows as the benchmark asks for more
+temporal resolution, which is the pattern expected of a representation that encodes time.
+The \textsc{window} arm reaches $0.184$, barely below the \textsc{patch} arm. Almost all of
+what the moments score here comes from naming the action, not from locating it. The loss
+axis again carries the matrix: \textsf{p}$\to$\textsf{pv} is worth $+0.025$ (paired
+$p<0.001$), exactly as on the two classification benchmarks.
+
+\paragraph{When it happens improves least.} Boundary localization barely separates
+anything. The best MAE cell reaches a swept boundary F1 of $0.169$, against $0.157$ for the
+\textsc{patch} moments and $0.148$ for the always-a-boundary predictor. SimMIM sits at
+$0.150$--$0.153$ in every cell, indistinguishable from the constant predictor. The margin
+of $0.021$ over that predictor is itself optimistic, because the swept metric picks the
+best of $30$ thresholds on validation data and the constant predictor has none to pick. As a check that the
+metric measures localization at all, the \textsc{window} arm scores exactly $0.000$: a
+prediction constant in time is given no boundary credit. Whatever masked pretraining
+teaches improves the account of \emph{which} actions a window contains far more than its
+account of \emph{where} they begin and end.
+
+\subsection{Clinical transfer: gait severity on CARE-PD}
+\label{sec:exp-carepd}
+
+\paragraph{Protocol.} CARE-PD~\cite{adeli2025carepd} pools gait recordings of Parkinson's
+patients from four cohorts, each annotated with the UPDRS gait item ($0$--$3$). We follow
+the paper's participant-level protocols exactly, and each is materialized as a named set of
+splits:
+\begin{itemize}
+\item \emph{within-site leave-one-subject-out} (LOSO): one cohort, one patient held out,
+  $110$ folds in total;
+\item \emph{cross-dataset}: train on one cohort, test on another, $12$ ordered pairs;
+\item \emph{leave-one-dataset-out} (LODO): train on three cohorts, test on the fourth.
+\end{itemize}
+A take is predicted by majority vote over its windows' argmaxes. The metric is the paper's
+macro F1 over scores $0$--$3$, where score $3$ is dropped from the average only and never
+from the data. Weight decay is selected once, on one BMCLab fold, and reused everywhere, as
+in the paper.
+
+Held-out predictions are \emph{pooled} over folds and scored once, never averaged per fold.
+A LOSO fold holds out a single patient who often walks at a single severity, and this
+distorts per-fold metrics in both directions. On T-SDU-PD, per-fold mAP reads $0.756$
+against $0.385$ pooled, since AP is $1$ by construction when one class is present. Per-fold
+macro F1 reads $0.157$ against $0.256$, since it divides by classes the patient never shows.
+The protocol cell $(\textsf{pk},\textsf{pk})$ is fixed in advance rather than taken as the
+best of nine, which would bias it upward. Two differences from the paper cannot be removed
+by matching the protocol. Our data stay at $60$\,Hz, where theirs are $30$\,Hz. And our
+inputs are OpenSim kinematics and torques, where theirs are SMPL meshes.
+
+\begin{table*}[t]
+\centering
+\small
+\begin{tabular}{lcccccccc}
+\toprule
+& & \multicolumn{2}{c}{within-site LOSO} & & \multicolumn{2}{c}{LODO} & \multicolumn{2}{c}{cross-dataset (as target)} \\
+\cmidrule(lr){3-4}\cmidrule(lr){6-7}\cmidrule(lr){8-9}
+Cohort & majority & ours & paper & & ours & paper range & ours & paper \\
+\midrule
+3DGait   & 0.159 & 0.271 $\pm$0.044 & 0.271 $\pm$0.082 & & 0.278 $\pm$0.087 & 0.11--0.43 & 0.262 & 0.287 $\pm$0.108 \\
+BMCLab   & 0.118 & 0.406 $\pm$0.024 & 0.559 $\pm$0.136 & & 0.296 $\pm$0.087 & 0.26--0.50 & 0.222 & 0.276 $\pm$0.123 \\
+PD-GaM   & 0.158 & \textbf{0.668} $\pm$0.020 & 0.620 $\pm$0.056 & & 0.372 $\pm$0.030 & 0.36--0.55 & 0.312 & 0.289 $\pm$0.112 \\
+T-SDU-PD & 0.152 & 0.284 $\pm$0.006 & 0.417 $\pm$0.052 & & 0.344 $\pm$0.025 & 0.13--0.49 & 0.244 & 0.290 $\pm$0.120 \\
+\bottomrule
+\end{tabular}
+\caption{UPDRS-gait macro F1 ($0$--$3$) on CARE-PD, MAE cell $(\textsf{pk},\textsf{pk})$
+fixed in advance, pooled over folds. Our $\pm$ is the sd over three pretraining seeds. The
+paper's $\pm$ is the spread across its seven published encoders, not a confidence interval.
+The majority floor is the LOSO one. The LODO range is read off the paper's Fig.~4a. The
+cross-dataset columns average over the three source cohorts.}
+\label{tab:exp-carepd}
+\end{table*}
+
+\paragraph{Results.} Table~\ref{tab:exp-carepd} shows the fixed cell. Within-site LOSO has
+no site shortcut, since it uses one capture rig, and there the probe clears the majority
+floor on every cohort, by $1.7\times$ on 3DGait up to $4.2\times$ on PD-GaM. On PD-GaM,
+the largest cohort, it exceeds the mean of the seven purpose-built encoders ($0.668$ against
+$0.620$). On 3DGait it matches that mean. It falls short on BMCLab ($-1.1$ encoder sd) and
+on T-SDU-PD ($-2.6$), which is the one cohort outside the published band.
+
+Cohort size decides between training within a site and borrowing others. For PD-GaM
+($1{,}700$ takes) and BMCLab ($781$), within-site LOSO wins, by $0.30$ and $0.11$. For
+T-SDU-PD ($381$) and 3DGait ($90$), training on the other three cohorts (LODO) beats
+training on the cohort's own patients. The crossover is monotone in cohort size. Averaged
+by source cohort in the cross-dataset protocol, PD-GaM transfers \emph{worst} ($0.188$,
+against $0.279$--$0.292$ for the other sources), which inverts the paper's finding. PD-GaM
+is also the only cohort captured at $25$\,Hz and hence the most heavily resampled by our
+$60$\,Hz pipeline, but we have not tested this explanation.
+
+\paragraph{Neither the matrix nor the objective separates on this task.} For MAE only $1$
+of the $12$ cohort-by-protocol blocks has a cell range above the noise bar, so the nine
+cells cannot be ranked on CARE-PD. Across objectives, pooled over protocols, JEPA, SimMIM
+and a thin-decoder MAE are within $0.01$ macro F1 of the standard MAE, and only the thin
+decoder's $+0.007$ reaches $p<0.05$. That SimMIM, whose features are nearly rank-1 and which
+fails the moments floor on BABEL, is level here shows how little a $4$-class severity
+readout asks of the representation. One effect does replicate. Adding torque to the
+\emph{input} (\textsf{pk}$\to$\textsf{pkd}) hurts cross-dataset transfer for MAE
+($-0.045$), SimMIM ($-0.037$) and the thin-decoder MAE ($-0.041$), each significant after
+correction.
+
+\subsection{Representation geometry}
+\label{sec:exp-geometry}
+
+\paragraph{Protocol.} Before any head is fit, we measure the pooled features the convex
+probe reads, through the probe's own pooler and normalization, on the $4{,}936$ tiled
+validation windows. The \emph{participation ratio},
+\begin{equation}
+\text{PR} = \frac{\left(\sum_i \lambda_i\right)^2}{\sum_i \lambda_i^2},
+\label{eq:pr}
+\end{equation}
+over the eigenvalues $\lambda_i$ of the feature covariance, counts the directions the
+features effectively use. It is $d$ for an isotropic covariance and $1$ for a rank-1 one.
+\emph{Linear CKA} compares cells pairwise. It is read against the CKA between seeds of one
+cell, which serves as its noise floor. Tiled windows are deterministic, so row $i$ is the
+same frames in every cell, as CKA requires.
+
+\paragraph{Results.} No MAE cell is collapsed: all sixteen use $15.6$ to $29.1$ of $256$
+directions. By contrast, SimMIM's features are nearly rank-1 on \texttt{amass\_clean}
+(effective rank $1.1$--$2.5$), and on \texttt{amass\_smpl} its participation ratio is
+$8.6$. This explains its probe scores before they are measured. The largest effect in the
+MAE matrix lies along the loss axis. Scoring torque in the loss raises the participation
+ratio from $16.6$ to $23.7$ on average (Table~\ref{tab:exp-ladder}), and to $29.1$ at
+$(\textsf{pk},\textsf{pkd})$. The expansion vanishes once torque is also an input:
+$(\textsf{pkd},\textsf{pkd})$ sits at $15.6$, a gap of $9\sigma$ against the pooled seed sd
+of $1.45$. So the torque target is not inert. It widens the representation by nearly half,
+in directions that a window-level linear action classifier barely uses: the same pair of
+cells differs by $0.005$ macro mAP. The participation ratio tracks probe mAP only loosely
+over the sixteen cells (Spearman $+0.70$, Pearson $+0.45$), so it measures something the
+benchmark does not. Cells are further apart than seeds of one cell (CKA
+$0.864\pm0.050$ against $0.936\pm0.022$), so the matrix axes do change the representation.
+
+\subsection{Label efficiency}
+\label{sec:exp-label-efficiency}
+
+\paragraph{Protocol.} A representation is supposed to pay for itself in labels, which a
+score at $100\%$ of the training set cannot express. We refit the convex probe on $5$, $10$,
+$25$, $50$ and $100\%$ of the labelled takes and score each fit on the full validation
+split, with the moments run through the identical head and fractions as the floor. We
+subsample by take, never by window: windows are overlapping crops of a take, so $5\%$ of
+windows would still touch nearly every take. The fractions are nested prefixes of one
+shuffle. Weight decay is re-swept at every fraction, because the penalty is fixed while the
+loss is averaged over rows, so an optimum found at $100\%$ over-regularizes at $5\%$. Every
+fraction is scored over one fixed label vocabulary. Otherwise a small fraction, which loses
+exactly the rare labels, would report a macro average over a different and easier set of
+classes.
+
+% TODO: results withheld. The generated table in results/representation/README.md flags the
+% current runs as scored on two different label sets (59 and 60 labels), which is the exact
+% failure the protocol above exists to prevent. Re-run label_efficiency_matrix.sh so every
+% fraction uses one vocabulary, regenerate, and only then add the curve here.
+
+\subsection{Nearest-neighbour retrieval}
+\label{sec:exp-knn}
+
+\paragraph{Protocol.} Dropping the head altogether, each validation window takes the labels
+of its $k$ nearest training windows under cosine similarity, weighted by a softmax with
+temperature $0.07$, for $k\in\{1,5,\dots,500\}$. This asks whether windows of the same
+action lie close together under \emph{any} weighting of the features, which a linear head
+cannot show.
+
+\paragraph{Results.} Retrieval recovers nearly all of the probe's score. The best MAE cell,
+$(\textsf{pk},\textsf{pv})$, reaches $0.3645$ macro mAP against $0.3734$ with a linear head.
+The four \textsf{pv}-loss cells are again the top four. The moments floor reaches $0.3315$,
+equal to its linear-head score, so a linear head adds nothing to the moments and little to
+the pretrained features. The pretrained gap over the moments is therefore a property of the
+features and not of the readout. Every MAE curve is still rising at $k=500$, the edge of
+the grid, while the moments peak at $k=100$, so the MAE figures are lower bounds.
+
+\subsection{Reconstruction and forecasting}
+\label{sec:exp-reconstruction}
+
+\paragraph{Protocol.} The last test asks how much of the raw signal survives in the frozen
+tokens. A small decoder (one layer, width $64$, about $0.4\times$ the encoder's FLOPs) is
+trained from scratch on top of each frozen backbone. It is identical in every cell, and it
+is kept small deliberately: the pretraining decoder runs at $8.6\times$ the encoder's FLOPs,
+enough to compute torque from kinematics by itself, so a decoder that size would rank
+decoders rather than backbones. The target is $(\sin\theta,\cos\theta)$ in every cell,
+since pose is the only channel every cell reads. The score is the mean per-DOF angular
+error in degrees, taken through $\operatorname{atan2}$ on the held-out tokens. Two masks
+share this rig:
+\begin{itemize}
+\item \emph{Reconstruction} holds out $75\%$ of tokens uniformly at random. This is off
+  pretraining's $90\%$ on purpose, so the number is not each cell's own pretraining
+  objective under a new name.
+\item \emph{Forecasting} holds out the last $8$ patches ($64$ frames, $1.07$\,s) across all
+  DOFs, and publishes two model-free floors in the same units: holding the last observed
+  frame (zero velocity) and extrapolating its velocity (constant velocity).
+\end{itemize}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcccc@{\hspace{1.2em}}cccc}
+\toprule
+& \multicolumn{4}{c}{reconstruction, $75\%$ uniform} & \multicolumn{4}{c}{forecasting, last $1.07$\,s} \\
+\cmidrule(lr){2-5}\cmidrule(lr){6-9}
+input $\backslash$ loss & \textsf{p} & \textsf{pv} & \textsf{pk} & \textsf{pkd} & \textsf{p} & \textsf{pv} & \textsf{pk} & \textsf{pkd} \\
+\midrule
+\textsf{p}   & 3.81 & 3.19 & 3.20 & 3.51 & 4.97 & 4.59 & 4.54 & 4.77 \\
+\textsf{pv}  & 3.47 & 3.03 & 3.03 & 3.26 & 4.70 & 4.30 & 4.33 & 4.40 \\
+\textsf{pk}  & 3.36 & 3.00 & \textbf{2.96} & 3.25 & 4.61 & \textbf{4.21} & 4.26 & 4.42 \\
+\textsf{pkd} & 3.42 & 3.03 & 2.98 & 3.21 & 4.71 & 4.25 & 4.26 & 4.35 \\
+\midrule
+\multicolumn{5}{l}{zero-velocity floor}     & \multicolumn{4}{c}{5.82} \\
+\multicolumn{5}{l}{constant-velocity floor} & \multicolumn{4}{c}{13.56} \\
+\bottomrule
+\end{tabular}
+\caption{Mean per-DOF angular error in degrees (lower is better) of a fixed small decoder
+trained on each frozen MAE backbone, \texttt{amass\_clean}, mean over four seeds. Seed sd is
+$0.06$--$0.20^\circ$ for reconstruction and $0.01$--$0.08^\circ$ for forecasting.}
+\label{tab:exp-reconstruction}
+\end{table}
+
+\paragraph{Results.} Table~\ref{tab:exp-reconstruction} shows the full matrix. On
+forecasting every cell beats both floors. The best, $(\textsf{pk},\textsf{pv})$, is
+$4.21^\circ$ against $5.82^\circ$ for holding the last frame, $28\%$ lower. Constant-velocity
+extrapolation is far worse than either ($13.56^\circ$), because it overshoots over a
+one-second horizon. Both masks rank the cells as the loss axis does elsewhere:
+reconstructing \textsf{p} alone is worst, and \textsf{pv} or \textsf{pk} is best. Adding
+torque to the loss costs pose fidelity ($3.30^\circ$ against $3.04^\circ$ on average):
+under a fixed decoder budget, a representation that also encodes dynamics keeps less
+precise angles.
+
+Before running this test we expected the inverse. A near-identity encoder reconstructs well
+while abstracting nothing, so reconstruction error might rank cells opposite to their
+downstream scores. The data do not show this. Lower reconstruction error goes with
+\emph{higher} BABEL macro mAP over the sixteen cells (Spearman $-0.60$, $p=0.014$), and
+lower forecasting error even more so ($-0.68$, $p=0.004$). In this matrix, the backbones
+that keep the most signal in their tokens are also the ones a linear probe can read best.
+
+\subsection{Summary}
+\label{sec:exp-summary}
+
+Three results hold across tests. First, the loss axis carries the channel matrix and the
+input axis barely matters. Reconstructing velocity is the single step that moves every
+benchmark: all three BABEL tasks, retrieval, reconstruction and forecasting. Second, the
+advantage of pretraining over summary statistics grows with the temporal resolution the
+task demands: $13\%$ on window classification, $21\%$ on single-action classification, $62\%$ on
+temporal segmentation. Yet
+boundary localization stays close to a constant predictor in every backbone. Third, the
+torque target changes the representation substantially, widening it by nearly half, in
+directions the action benchmarks do not read. On clinical severity no axis and no objective
+can be ranked above seed noise.

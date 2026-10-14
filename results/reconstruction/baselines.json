@@ -2,14 +2,14 @@
   "zero_velocity": {
     "degrees": 5.8183,
     "sd": 0.0,
-    "runs": 10,
+    "runs": 64,
     "protocol": "exact, no model -- same windows, same horizon, same unit",
     "note": "Zero-velocity holds the last observed frame for all 64 predicted frames; constant-velocity extrapolates the wrapped difference of the last two observed frames. Computed inside the same validation loop as the model, so the split and the horizon are identical by construction rather than by agreement."
   },
   "const_velocity": {
     "degrees": 13.5593,
     "sd": 0.0,
-    "runs": 10,
+    "runs": 64,
     "protocol": "exact, no model -- same windows, same horizon, same unit",
     "note": "Zero-velocity holds the last observed frame for all 64 predicted frames; constant-velocity extrapolates the wrapped difference of the last two observed frames. Computed inside the same validation loop as the model, so the split and the horizon are identical by construction rather than by agreement."
   }

@@ -12,15 +12,24 @@ score was available from summary statistics and the representation is earning li
     uv run python scripts/moments_baseline.py
     uv run python scripts/moments_baseline.py --config config/experiment_linear_probe.yaml
     uv run python scripts/moments_baseline.py --passes 4 --epochs 40
-    uv run python scripts/moments_baseline.py --channels 0,1 0,1,4 all
+    uv run python scripts/moments_baseline.py --channels p pk all --out floors.json
+    uv run python scripts/moments_baseline.py --self-check
 
 ``--channels`` restricts the moments to a subset of feature channels and trains one head
-per subset, mirroring the ``loss_channels`` arms of ``scripts/ablate.sh channels``. It
-answers a question that ablation cannot: those arms vary what the *loss* scores while the
-*input* always carries all five channels, so a gap from adding torque to the objective
-could equally be a gap from torque being an informative input. Here the input is the only
-thing that changes. A subset is a slice of the collected moments, so every arm costs one
-collection between them.
+per subset. A subset is a slice of the collected moments, so every arm costs one
+collection between them. Each spec is a rung name (``p``, ``pv``, ``pk``, ``pkd``, resolved
+through the representation's channel names exactly as ``scripts/pretrain_matrix.sh``
+builds the ladder), comma-separated indices, or ``all``.
+
+**The default is the whole input ladder, one floor per rung.** It used to be ``all``, and
+that is a pkd-equivalent floor: it hands the moments velocity, acceleration and torque as
+ready-made channels, which an order-invariant summary cannot derive from pose, while a
+``p``-input cell reads sin and cos only. Set against every row of the matrix, one ``all``
+floor overstates the bar for every row but the last. A corpus without the ladder's
+channels (SMPL's rot6d) falls back to ``all``, and says so.
+
+``--out`` writes every arm, with the channel names it read, to JSON, so a floor copied into
+a ``baselines.json`` can no longer lose which input it was computed on.
 
 Read the output beside `scripts/results.py runs/<probes> val/macro_map`. The data, the
 label set, the head and the metrics are the probe's, so the numbers are comparable; the
@@ -43,6 +52,7 @@ would not. More passes buy back that variety at a linear cost in memory.
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import torch as t
@@ -59,6 +69,7 @@ from sometria.downstream.metrics import (
     WindowMeanAveragePrecision,
 )
 from sometria.downstream.segmentation import best_boundary_f1, boundary_f1
+from sometria.representation import Representation, build_representation
 
 
 #: Names of the moments, in the order :func:`moments` stacks them.
@@ -75,6 +86,59 @@ def channel_slice(features: t.Tensor, channels: tuple[int, ...], num_channels: i
 
     grid = features.unflatten(1, (-1, num_channels, len(MOMENTS)))
     return grid[:, :, t.tensor(channels), :].flatten(start_dim=1)
+
+
+#: The input ladder by channel name, the rungs ``scripts/pretrain_matrix.sh`` pretrains on.
+RUNGS = {
+    "p": ("sin", "cos"),
+    "pv": ("sin", "cos", "vel"),
+    "pk": ("sin", "cos", "vel", "acc"),
+    "pkd": ("sin", "cos", "vel", "acc", "tau"),
+}
+
+
+def expand(specs: list[str], representation: Representation) -> list[str]:
+    """``ladder`` -> the four rungs, or ``all`` where this corpus has no such channels."""
+
+    out = []
+    for spec in specs:
+        if spec != "ladder":
+            out.append(spec)
+        elif set(RUNGS["pkd"]) <= set(representation.channels):
+            out += list(RUNGS)
+        else:
+            print(f"no p/pv/pk/pkd ladder in channels {list(representation.channels)}; using all")
+            out.append("all")
+    return out
+
+
+def resolve(spec: str, representation: Representation, num_channels: int) -> tuple[int, ...]:
+    """A ``--channels`` spec -> channel indices: a rung name, ``all``, or ``0,1,4``."""
+
+    if spec == "all":
+        return tuple(range(num_channels))
+    if spec in RUNGS:
+        try:
+            return representation.indices(*RUNGS[spec])
+        except KeyError as error:
+            raise SystemExit(f"rung {spec!r} does not exist for this corpus: {error}") from None
+    channels = tuple(int(c) for c in spec.split(","))
+    if not all(0 <= c < num_channels for c in channels):
+        raise SystemExit(f"channels {spec} out of range for {num_channels} channels")
+    return channels
+
+
+def self_check() -> None:
+    """The rung names land on the right slots, and slicing keeps those channels' moments."""
+
+    representation = Representation(dofs=("hip_flexion_r",), excluded=())
+    assert [resolve(r, representation, 5) for r in RUNGS] == [(0, 1), (0, 1, 2), (0, 1, 2, 3), (0, 1, 2, 3, 4)]
+    assert expand(["ladder", "all"], representation) == ["p", "pv", "pk", "pkd", "all"]
+    # 2 DOFs x 5 channels x 4 moments, each entry encoding its own (dof, channel).
+    grid = t.tensor([[[10 * d + c] * len(MOMENTS) for c in range(5)] for d in range(2)], dtype=t.float)
+    picked = channel_slice(grid.flatten().unsqueeze(0), resolve("pv", representation, 5), 5)
+    assert picked.unflatten(1, (2, 3, len(MOMENTS)))[0, :, :, 0].tolist() == [[0, 1, 2], [10, 11, 12]]
+    print("self-check passed")
 
 
 def moments(features: t.Tensor) -> t.Tensor:
@@ -256,11 +320,17 @@ def main() -> None:
     parser.add_argument(
         "--channels",
         nargs="+",
-        default=["all"],
+        default=["ladder"],
         metavar="SPEC",
-        help='channel subsets, comma-separated indices or "all" (e.g. 0,1 0,1,4 all)',
+        help='channel subsets: a rung (p pv pk pkd), "ladder" for all four (default), '
+             '"all", or comma-separated indices (e.g. 0,1,4)',
     )
+    parser.add_argument("--out", type=Path, help="write every arm and its channels to this JSON")
+    parser.add_argument("--self-check", action="store_true", help="run the channel checks and exit")
     arguments = parser.parse_args()
+    if arguments.self_check:
+        self_check()
+        return
 
     t.manual_seed(arguments.seed)
     device = "cuda" if t.cuda.is_available() else "cpu"
@@ -302,21 +372,21 @@ def main() -> None:
         variants = {"window": (train_window, train_y, val_window, val_y)}
 
     num_channels = config.encoder.num_features
+    representation = build_representation(config.dataloader.human)
+    specs = expand(arguments.channels, representation)
+    read = {}
     results = {}
     for variant, (train_x, train_labels, val_x, val_labels) in variants.items():
-        for spec in arguments.channels:
-            channels = (
-                tuple(range(num_channels)) if spec == "all"
-                else tuple(int(c) for c in spec.split(","))
-            )
-            if not all(0 <= c < num_channels for c in channels):
-                raise SystemExit(f"channels {spec} out of range for {num_channels} channels")
+        for spec in specs:
+            channels = resolve(spec, representation, num_channels)
 
             subset = (channel_slice(train_x, channels, num_channels), train_labels)
             held_out = (channel_slice(val_x, channels, num_channels), val_labels)
 
             name = spec if len(variants) == 1 else f"{variant}/{spec}"
-            print(f"\n{name} -- {subset[0].shape[1]} features, {len(subset[0])} rows")
+            read[name] = [representation.channels[c] for c in channels]
+            print(f"\n{name} -- channels {read[name]}, {subset[0].shape[1]} features, "
+                  f"{len(subset[0])} rows")
 
             # Reseeded per arm so a subset is not also a different initialization.
             t.manual_seed(arguments.seed)
@@ -349,6 +419,18 @@ def main() -> None:
     print(f"  {'arm':<{width}}  " + "  ".join(f"{m.removeprefix('val/'):>11}" for m in metrics))
     for name, scores in results.items():
         print(f"  {name:<{width}}  " + "  ".join(f"{scores[m]:>11.4f}" for m in metrics))
+
+    if arguments.out:
+        arguments.out.write_text(json.dumps({
+            "config": str(arguments.config),
+            "passes": arguments.passes,
+            "epochs": arguments.epochs,
+            "arms": {
+                name: {"channels": read[name]} | {m.removeprefix("val/"): v for m, v in scores.items()}
+                for name, scores in results.items()
+            },
+        }, indent=2))
+        print(f"wrote {arguments.out}")
 
 
 if __name__ == "__main__":

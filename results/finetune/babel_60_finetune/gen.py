@@ -28,7 +28,8 @@ matplotlib.use("Agg")  # figures are written to disk, never shown
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.patches import Rectangle
 from omegaconf import OmegaConf
 from scipy import integrate, stats
 
@@ -592,6 +593,10 @@ FIGURES = HERE / "figures"
 # enough to the runs to rescale every ladder panel around itself.
 HIDDEN_BASELINES = {"moments"}
 
+# Baselines the compact figures always draw. None yet: this page's baselines.json carries
+# chance only, which would flatten every ladder. Name one here once it lands there.
+LADDER_BASELINES: set[str] = set()
+
 
 def _style(ax: "plt.Axes") -> None:
     """Recessive frame: the marks carry the chart, the box around them does not."""
@@ -631,9 +636,9 @@ def fig_matrix(df: pl.DataFrame, metric: str) -> str | None:
     flattening the 0.345-0.367 MAE matrix into one uniform block; the levels are what
     the printed numbers and the ladder figure are for.
 
-    Each cell prints its shortfall against the best cell of its own panel, the same
-    number the README tables carry beside it, since the shade alone orders the cells
-    without saying how far apart they are.
+    Each cell prints its mean only, and each title the panel's range and pooled seed sd, so
+    how far apart two cells are reads against noise; the README tables carry the per-cell
+    sd and the shortfall from the best cell.
 
     Every (corpus, arch) that was probed gets a panel, including the ones with a single
     filled cell: the eight blanks around it are the point, since what a corpus has *not*
@@ -681,6 +686,9 @@ def fig_matrix(df: pl.DataFrame, metric: str) -> str | None:
         # Range in the title, since each panel carries its own scale and there is no
         # shared bar to read it off.
         extent = f"{lo:.3f} – {hi:.3f}" if hi > lo else f"{lo:.3f}, one cell"
+        sds = [sd for _, sd in means.values() if sd]
+        if sds:
+            extent += f" · seed sd {sum(sds) / len(sds):.3f}"
         ax.set_title(f"{corpus}\n{arch}\n{extent}", fontsize=9, color=INK)
         _style(ax)
         ax.spines["left"].set_visible(False)
@@ -696,14 +704,10 @@ def fig_matrix(df: pl.DataFrame, metric: str) -> str | None:
                 # Ink flips on the dark half of the ramp so the number stays readable
                 # in the strongest cells as well as the palest.
                 shade = INK if (mean - span[0]) / (span[1] - span[0]) < 0.55 else SURFACE
-                # Same shortfall the README tables print: against the best cell of this
-                # panel, which is also what the color ramp is normalized to, so the
-                # percentage and the shade are two readings of one number.
-                below = f"{(mean - hi) / hi:+.1%}"
-                ax.text(j, i - 0.1, f"{mean:.3f}", ha="center", va="center",
-                        fontsize=9, color=shade)
-                ax.text(j, i + 0.18, f"±{sd:.3f} ({below})" if sd else below,
-                        ha="center", va="center", fontsize=6.5, color=shade)
+                # Mean only. The shortfall-from-best the README tables print is what the
+                # ramp already shows, and per-cell sd is in the tables; one pooled sd sits
+                # in the title instead, so a cell reads as one number.
+                ax.text(j, i, f"{mean:.3f}", ha="center", va="center", fontsize=11, color=shade)
 
     # No colorbar: with a per-panel scale one bar would be wrong for every panel but the
     # one it was drawn from. Each panel's range is in its title instead.
@@ -756,6 +760,92 @@ def _spread(ax: "plt.Axes", labels: list[tuple[float, float, str, str]]) -> None
         placed = y
         ax.annotate(text, (x, y), textcoords="offset points", xytext=(6, 0),
                     fontsize=7, color=color, va="center")
+
+
+def fig_matrix_compact(df: pl.DataFrame, metric: str) -> str | None:
+    """``fig_matrix`` in one row: amass_clean panels only, SMPL's (p, p) as one cell beside each.
+
+    The full small multiple spends a whole row of panels on amass_smpl, which has one or two
+    cells per objective. Here each objective's panel is as wide as its matrix, and the SMPL
+    pose-only cell sits past a gap at the ``p`` row, on that panel's colour scale, so it
+    reads against the matrix beside it. It is a reference mark and not a cell of this
+    benchmark: SMPL is scored on ``babel_paired`` where amass_clean is on ``babel_official``.
+    Written beside the full figure and not embedded in the README, which keeps the full one.
+    """
+
+    clean = {arch: g for (arch,), g in df.filter(pl.col("corpus") == "amass_clean").group_by("arch")}
+    if not clean:
+        return None
+    smpl = df.filter(pl.col("corpus") == "amass_smpl")
+    path = HERE / "baselines.json"
+    floors = [(entry[metric], name.removesuffix(" (CE)"))
+              for name, entry in (json.loads(path.read_text()).items() if path.exists() else [])
+              if name in LADDER_BASELINES and entry.get(metric) is not None]
+    cmap = LinearSegmentedColormap.from_list("sequential", SEQUENTIAL)
+    cmap.set_bad(MISSING)
+
+    archs = sorted(clean)
+    widths = [len(AXIS) if has_loss_axis(clean[a]) else 1 for a in archs]
+    extra = 1.2  # gap plus the SMPL cell, in cell widths
+    fig, axes = plt.subplots(
+        1, len(archs), figsize=(0.55 * sum(w + extra for w in widths) + 1.2, 3.1), squeeze=False,
+        gridspec_kw={"width_ratios": [w + extra for w in widths]}, layout="constrained",
+    )
+    fig.get_layout_engine().set(w_pad=0.02, wspace=0.14)
+
+    for k, (ax, arch, width) in enumerate(zip(axes.flat, archs, widths)):
+        columns = AXIS if width > 1 else [None]
+        means = cell_means(clean[arch], metric)
+        ref = cell_means(smpl.filter(pl.col("arch") == arch), metric).get(("p", columns[0] and "p"))
+        grid = np.array([[means.get((r, c), (np.nan,))[0] for c in columns] for r in AXIS], dtype=float)
+        values = [m for m, _ in means.values()] + ([ref[0]] if ref else [])
+        lo, hi = min(values), max(values)
+        norm = Normalize(lo, hi if hi > lo else lo * 1.02)
+        ax.imshow(grid, cmap=cmap, norm=norm, aspect="equal",
+                  extent=(-0.5, width - 0.5, len(AXIS) - 0.5, -0.5))
+
+        def label(x, y, value, fontsize=9.5):
+            shade = INK if norm(value) < 0.55 else SURFACE
+            ax.text(x, y, f"{value:.3f}", ha="center", va="center", fontsize=fontsize, color=shade)
+
+        for i, row in enumerate(AXIS):
+            for j, col in enumerate(columns):
+                if (row, col) in means:
+                    label(j, i, means[(row, col)][0])
+        if ref:
+            x = width + extra - 1.0
+            ax.add_patch(Rectangle((x - 0.5, -0.5), 1, 1, color=cmap(norm(ref[0])), linewidth=0))
+            label(x, 0, ref[0], fontsize=8.5)
+            ax.text(x, 0.62, "SMPL\n(p, p)", ha="center", va="top", fontsize=7, color=MUTED)
+        # Baselines at the foot of the same column, in neutral grey: they are references,
+        # not cells, and on the panel's ramp they would either stretch it or clip to pale.
+        x = width + extra - 1.0
+        for row, (value, name) in zip(range(len(AXIS) - len(floors), len(AXIS)), floors):
+            ax.add_patch(Rectangle((x - 0.47, row - 0.47), 0.94, 0.94, color=GRID, linewidth=0))
+            ax.text(x, row - 0.22, f"{value:.3f}", ha="center", va="center", fontsize=8.5, color=INK)
+            ax.text(x, row + 0.22, name.replace(" ", "\n", 1), ha="center", va="center",
+                    fontsize=6, color=MUTED, linespacing=1.2)
+
+        ax.set_xlim(-0.5, width - 0.5 + extra)
+        ax.set_ylim(len(AXIS) - 0.5, -0.5)
+        ax.set_xticks(range(len(columns)), [c or "--" for c in columns], fontsize=8)
+        ax.set_yticks(range(len(AXIS)), AXIS if k == 0 else [], fontsize=8)
+        ax.set_xlabel("loss channels" if width > 1 else "no loss axis", fontsize=8, color=MUTED)
+        if k == 0:
+            ax.set_ylabel("input channels", fontsize=8, color=MUTED)
+        name = {"jepa": "JEPA", "simmim": "SimMIM"}.get(arch.rsplit("_", 1)[-1], "MAE")
+        sds = [sd for _, sd in means.values() if sd]
+        sd_text = f"\nseed sd {sum(sds) / len(sds):.3f}" if sds else "\n1 seed"
+        ax.set_title(f"{name}{sd_text}", fontsize=9, color=INK, loc="left")
+        _style(ax)
+        for side in ax.spines.values():
+            side.set_visible(False)
+        ax.tick_params(length=0)
+        ax.grid(False)
+
+    fig.suptitle(f"{TITLES.get(metric, metric)}, amass_clean -- colour within panel only; "
+                 "SMPL cell scored on babel_paired; grey cells are baselines", fontsize=8.5, color=MUTED)
+    return _save(fig, f"{metric}_matrix_compact.png")
 
 
 def fig_ladder(df: pl.DataFrame, metric: str) -> str | None:
@@ -879,6 +969,114 @@ def fig_ladder(df: pl.DataFrame, metric: str) -> str | None:
     return _save(fig, f"{metric}_ladder.png")
 
 
+def fig_ladder_compact(df: pl.DataFrame, metric: str) -> str | None:
+    """``fig_ladder`` in one row: amass_clean only, one panel per (objective, axis).
+
+    Panels of one objective share a y-axis and sit close; objectives are set apart by a
+    wider gap and each has its own scale, for the reason ``fig_ladder`` gives. Means and sd bars
+    only -- the per-seed ladders are in the full figure. SMPL is left
+    out: a ladder point averages over the other axis, and SMPL's single pose-only cell is
+    not that quantity -- ``fig_matrix_compact`` carries it instead. Written beside the full
+    figure and not embedded in the README.
+    """
+
+    clean = df.filter(pl.col("corpus") == "amass_clean")
+    archs = sorted(clean["arch"].unique())
+    if not archs:
+        return None
+    colours = dict(zip(["", "jepa", "simmim"], SERIES))
+    panels = []  # (arch, axis) per drawn panel, None for a spacer between objectives
+    for arch in archs:
+        if panels:
+            panels.append(None)
+        axes_of = ["input", "loss"] if has_loss_axis(clean.filter(pl.col("arch") == arch)) else ["input"]
+        panels += [(arch, axis) for axis in axes_of]
+
+    fig, axes = plt.subplots(
+        # Spacers are wide enough for the baseline names printed past each objective.
+        1, len(panels), figsize=(2.3 * sum(1 for x in panels if x) + 1.7 * panels.count(None) + 1.0, 2.9),
+        squeeze=False, gridspec_kw={"width_ratios": [1 if x else 0.75 for x in panels], "wspace": 0.12},
+    )
+    axes = axes[0]
+    first = {}
+    baselines = json.loads((HERE / "baselines.json").read_text()) if (HERE / "baselines.json").exists() else {}
+    for ax, panel in zip(axes, panels):
+        if panel is None:
+            ax.set_axis_off()
+            continue
+        arch, axis = panel
+        suffix = arch.rsplit("_", 1)[-1]
+        name, colour = {"jepa": "JEPA", "simmim": "SimMIM"}.get(suffix, "MAE"), colours.get(
+            suffix if suffix in colours else "", SERIES[0])
+        if arch in first:
+            ax.sharey(first[arch])
+            ax.tick_params(labelleft=False)
+        else:
+            first[arch] = ax
+        _style(ax)
+        ax.grid(axis="y", color=GRID, linewidth=0.8)
+        ax.set_axisbelow(True)
+
+        cells = clean.filter(pl.col("arch") == arch)
+        if has_loss_axis(cells):
+            # Only loss rungs every input row has: a rung present in one row alone would
+            # average a different set of cells than its neighbours and draw as if it didn't.
+            rows = cells["input"].unique().to_list()
+            full = [lv for lv in AXIS
+                    if set(cells.filter(pl.col("loss") == lv)["input"].unique().to_list()) >= set(rows)]
+            cells = cells.filter(pl.col("loss").is_in(full))
+        per_rep = cells.group_by("replicate", axis).agg(pl.col(metric).mean())
+        points = [(AXIS.index(lv), v.mean(), v.std() if len(v) > 1 else 0.0)
+                  for lv in AXIS if len(v := per_rep.filter(pl.col(axis) == lv)[metric])]
+        ax.errorbar([q[0] for q in points], [q[1] for q in points], yerr=[q[2] for q in points],
+                    color=colour, linewidth=2.2, marker="o", markersize=5, capsize=2, elinewidth=1, zorder=3)
+
+        ax.set_xticks(range(len(AXIS)), AXIS, fontsize=8)
+        ax.set_xlim(-0.35, len(AXIS) - 0.65)
+        ax.tick_params(axis="y", labelsize=7.5)
+        one_seed = cells.group_by("input", "loss").agg(pl.len())["len"].max() == 1
+        ax.set_title(f"{name} · {axis}" + (" · 1 seed" if one_seed else ""), fontsize=9, color=INK,
+                     loc="left")
+        ax.set_xlabel(f"{axis} channels", fontsize=7.5, color=MUTED)
+
+    # Unlike fig_ladder, the baselines named in LADDER_BASELINES are always drawn: each
+    # objective's y-range is stretched to take them in, since the reference is the point.
+    refs = {}
+    for arch, ax in first.items():
+        found = [(entry[metric], name) for name, entry in baselines.items()
+                 if name in LADDER_BASELINES and entry.get(metric) is not None]
+        if not found:
+            continue
+        low, high = ax.get_ylim()
+        values = [value for value, _ in found]
+        low, high = min(low, *values), max(high, *values)
+        pad = 0.06 * (high - low)
+        ax.set_ylim(low - pad, high + pad)  # shared within the objective, so one call does both
+        mine = [other for other, panel in zip(axes, panels) if panel and panel[0] == arch]
+        for value, name in found:
+            for other in mine:  # above the grid, below the data: a floor on a gridline must show
+                other.axhline(value, color=MUTED, linewidth=1, linestyle="--", zorder=1.5)
+        refs[arch] = (mine[-1], [(value, name.removesuffix(" (CE)")) for value, name in found])
+    # Names past the right edge of each objective's last panel, nudged apart: two floors
+    # 0.007 apart would otherwise print on top of each other and of the data.
+    for ax, found in refs.values():
+        low, high = ax.get_ylim()
+        placed = []
+        for value, name in sorted(found):
+            y = (value - low) / (high - low)
+            y = max(y, placed[-1] + 0.10) if placed else y
+            placed.append(y)
+            ax.text(1.03, y, name, transform=ax.transAxes, fontsize=8, color=INK,
+                    ha="left", va="center", clip_on=False)
+
+    first[archs[0]].set_ylabel(TITLES.get(metric, metric), fontsize=8, color=INK)
+    fig.suptitle(f"What each axis buys, amass_clean -- each point averages the other axis; "
+                 "bars ±1 sd over seeds", fontsize=8.5, color=MUTED, y=0.99)
+    # Fixed margins, not tight_layout: the spacer axes beside shared-y panels trip it.
+    fig.subplots_adjust(top=0.80, bottom=0.17, left=0.05, right=0.90)
+    return _save(fig, f"{metric}_ladder_compact.png")
+
+
 def fig_corpora(df: pl.DataFrame, metric: str) -> str | None:
     """Corpus against corpus, cell by cell, one panel per architecture and challenger.
 
@@ -994,6 +1192,8 @@ def fig_corpora(df: pl.DataFrame, metric: str) -> str | None:
 def figures(df: pl.DataFrame, metric: str) -> list[str]:
     """The three figures for one metric, as markdown, skipping any the data cannot fill."""
 
+    fig_matrix_compact(df, metric)  # written beside the full figure, not embedded
+    fig_ladder_compact(df, metric)
     made = [
         ("Each matrix on its own color scale", fig_matrix(df, metric)),
         ("What each axis buys, per architecture", fig_ladder(df, metric)),

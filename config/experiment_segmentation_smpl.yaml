@@ -1,0 +1,66 @@
+# The SMPL arm's action-segmentation probe.
+#
+# config/experiment_segmentation.yaml with the corpus swapped, nothing else: same label
+# set, same 0.5 patch coverage, same frame-only annotations, same 30 patches. Those four
+# are the task and have to stay equal across arms; the joint definition, the normalization
+# statistics, the view and the encoder input shape are the corpus and do not.
+#
+# Read `val/macro_map` against the moments floor in
+# results/probe/babel_60_segmentation/baselines.json, and `val/boundary_best_f1s` against
+# the trivial all-change predictor at 0.1481 -- on the OpenSim arm every one of 36 cells
+# across three objectives landed between 0.1498 and 0.1694, so the gate is the column to
+# check here before anything else.
+#
+# `babel_paired` rather than `babel_official`, as everywhere on this arm; see
+# config/experiment_probe_babel_official_smpl.yaml for what that costs in comparability.
+
+dataloader:
+  root: data/processed
+  human: config/smpl.yaml
+  normalization: stats/smpl_rot6d_log_vel_acc_v1/pretrain_paired_v1_train_clean.pt
+  batch_size: 32
+  num_workers: 4
+  window_frames: 240
+  label_set: babel_action_60
+  # Higher than the window task's 0.15: a patch is 8 frames, so a segment either covers
+  # most of it or misses it, and a low threshold would smear every label across the
+  # neighbours of the patches it really occupies.
+  label_min_coverage: 0.5
+  # 240 frames / patch_size 8. Setting this is what makes the target temporal.
+  label_patches: 30
+  # Frame-level annotations only. BABEL's sequence-level ones span 0..dur exactly, so they
+  # are constant across every window and cannot produce a boundary.
+  label_types: ["frame"]
+
+  train:
+    split_set: babel_paired
+    split: train
+    source_datasets: ["AMASS-SMPL"]
+
+  val:
+    split_set: babel_paired
+    split: val
+    source_datasets: ["AMASS-SMPL"]
+
+# Only read when `model.checkpoint` is null; kept matching the SMPL pretraining config.
+encoder:
+  num_dofs: 21
+  num_features: 18
+  patch_size: 8
+  window_frames: 240
+  d_model: 256
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+model:
+  name: segmenter
+  checkpoint: null
+  encoder: teacher
+  pool: mean
+  lr: 0.001
+
+training:
+  seed: 13
+  monitor: val/boundary_best_f1s

@@ -1,0 +1,67 @@
+# The convex probe, scored under BABEL's published protocol rather than ours.
+#
+# Everything about the head is config/experiment_linear_probe.yaml: frozen backbone, mean
+# pooling, one Linear, L-BFGS, `weight_decay` swept and selected on macro mAP. What
+# changes is what a row is. `chunk_spans` swaps LabelledWindows for LabelledSpanChunks:
+# chunks cut inside an annotated span instead of windows tiled over the take, the span's
+# categories as the target, short spans looped to fill the window, and takes shorter than
+# the window admitted rather than dropped. See that class for why each of those is theirs.
+#
+# The number this produces is comparable to BABEL's table in *protocol* only. Their
+# features are 25 joint positions into a 2s-AGCN and ours are 43 OpenSim DOFs into a
+# transformer, and their chunk is 5 seconds where ours is 4 -- 300 frames is not divisible
+# by the 8-frame patch, and the positional table is fit for 30 time patches. Read it as a
+# sanity check against 0.42 / 0.74 / 0.24 (their CE row), never as a win or a loss.
+#
+# Scores under this config do not belong in results/probe/babel_60_convex/: same head,
+# same checkpoint, different rows.
+
+dataloader:
+  root: data/processed
+  human: config/human.yaml
+  normalization: stats/opensim_sincos_log_vel_acc_tau_v2/pretrain_v1_train_clean.pt
+  batch_size: 32
+  num_workers: 4
+  window_frames: 240
+  label_set: babel_action_60
+  # BABEL's protocol, and the only line that separates this file from the probe config.
+  # `label_min_coverage` is deliberately absent: coverage decides what a *window* is
+  # labelled with, and a chunk inherits its span's labels outright.
+  chunk_spans: true
+
+  train:
+    split_set: babel_official
+    split: train
+    source_datasets: ["AMASS"]
+
+  val:
+    split_set: babel_official
+    split: val
+    source_datasets: ["AMASS"]
+
+# Read only when `model.checkpoint` is null; kept matching the pretraining config so the
+# random-initialization control stays the same architecture as what it controls for.
+encoder:
+  num_dofs: 43
+  num_features: 5
+  patch_size: 8
+  window_frames: 240
+  d_model: 256
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+model:
+  name: classifier
+  checkpoint: null
+  encoder: teacher
+  pool: mean
+  lr: 0.001
+
+training:
+  seed: 13
+  # Chunks are a deterministic enumeration, not one random crop per sample per pass, so
+  # every pass past the first refits identical rows. The tiled probe's 20 buys nothing here.
+  train_passes: 1
+  monitor: val/macro_map

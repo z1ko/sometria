@@ -1,0 +1,69 @@
+# The SMPL arm's BABEL-60 probe under BABEL's own protocol.
+#
+# It is config/experiment_probe_babel_official.yaml with the four corpus-level differences
+# of config/experiment_linear_probe_smpl.yaml folded in: the joint definition, the
+# statistics the frozen backbone was pretrained under, which samples the view holds, and
+# the from-scratch encoder's input shape. The protocol -- chunks cut inside an annotated
+# span, the span's categories as the target, short spans looped to fill the window -- is
+# untouched, because that is what has to stay equal for the two arms to be read together.
+#
+# Nothing in sometria.downstream.dataset.LabelledSpanChunks is OpenSim-specific: it slices
+# stored features and tiles them, and BABEL's spans are keyed by sample_id, of which the
+# annotations table holds 195,218 AMASS-SMPL rows.
+#
+# The split set is `babel_paired`, as everywhere else on this arm -- BABEL's own split
+# restricted to takes both imports produced. Note what that costs: the OpenSim
+# official-protocol page (results/probe/babel_60_official/) scores `babel_official`, so
+# numbers from this config are NOT comparable to it cell for cell. They are comparable to
+# each other across SMPL objectives, and to an OpenSim run on `babel_paired` that does not
+# currently exist. Read accordingly.
+
+dataloader:
+  root: data/processed
+  human: config/smpl.yaml
+  normalization: stats/smpl_rot6d_log_vel_acc_v1/pretrain_paired_v1_train_clean.pt
+  batch_size: 32
+  num_workers: 4
+  window_frames: 240
+  label_set: babel_action_60
+  # BABEL's protocol, and the only line that separates this file from the SMPL probe
+  # config. `label_min_coverage` is deliberately absent: coverage decides what a *window*
+  # is labelled with, and a chunk inherits its span's labels outright.
+  chunk_spans: true
+
+  train:
+    split_set: babel_paired
+    split: train
+    source_datasets: ["AMASS-SMPL"]
+
+  val:
+    split_set: babel_paired
+    split: val
+    source_datasets: ["AMASS-SMPL"]
+
+# Only read when `model.checkpoint` is null; kept matching the SMPL pretraining config so
+# the random-initialization control stays the same architecture as what it controls for.
+encoder:
+  num_dofs: 21
+  num_features: 18
+  patch_size: 8
+  window_frames: 240
+  d_model: 256
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+
+model:
+  name: classifier
+  checkpoint: null
+  encoder: teacher
+  pool: mean
+  lr: 0.001
+
+training:
+  seed: 13
+  # Chunks are a deterministic enumeration, not one random crop per sample per pass, so
+  # every pass past the first refits identical rows.
+  train_passes: 1
+  monitor: val/macro_map
