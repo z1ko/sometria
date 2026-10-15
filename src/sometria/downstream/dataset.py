@@ -128,6 +128,9 @@ class LabelledWindows(t.utils.data.Dataset):
             "features": features[start : start + self.window_frames],
             "labels": labels,
             "sample_id": item["sample_id"],
+            # NaN, not a default, where the corpus has none (amass-smpl): torque per kg of
+            # an invented mass is a number with no meaning. Read by forecast_dynamics only.
+            "mass": float((item.get("metadata") or {}).get("subject_mass_kg") or "nan"),
         }
 
 
