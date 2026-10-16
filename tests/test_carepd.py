@@ -215,6 +215,12 @@ def test_pretrain_split_can_exclude_an_eval_corpus(tmp_path):
     ids = restricted.filter(pl.col("split_set") == "pretrain_amass")["sample_id"].to_list()
     assert ids == [amass["sample_id"]]
 
+    excluded = create_pretrain_split(
+        output_root=tmp_path, split_set="pretrain_none", exclude=(amass["sample_id"],),
+        source_datasets=("AMASS",),
+    )
+    assert excluded.filter(pl.col("split_set") == "pretrain_none").is_empty()
+
 
 def test_probe_datamodule_follows_the_label_set_off_babel(release, tmp_path):
     """The two settings that decide whether a CARE-PD probe sees any data at all.

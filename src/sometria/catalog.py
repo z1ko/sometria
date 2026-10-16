@@ -378,6 +378,7 @@ def create_pretrain_split(
     output_root: str | Path,
     split_set: str = "pretrain_v1",
     source_datasets: tuple[str, ...] = (),
+    exclude: tuple[str, ...] = (),
 ) -> pl.DataFrame:
     """Create the default self-supervised pretraining split.
 
@@ -391,6 +392,9 @@ def create_pretrain_split(
     clinical probe, and pretraining on it would train on the probe's own subjects.
     Name the corpora rather than relying on the default once such a corpus exists.
 
+    ``exclude`` drops named sample ids on top of that, for quality judgements the catalog
+    does not carry -- the residual grade AMASS-DYN ships in its own report, for one.
+
     This lives beside ``build_motion_view`` rather than in ``babel``: persisting a
     view and materializing one are the same question asked in two directions, and
     the policy is really "hold out whatever an evaluation benchmark reserved" --
@@ -402,6 +406,8 @@ def create_pretrain_split(
 
     if source_datasets:
         catalog = catalog.filter(pl.col("source_dataset").is_in(source_datasets))
+    if exclude:
+        catalog = catalog.filter(~pl.col("sample_id").is_in(exclude))
 
     babel_train_ids = splits.filter(
         (pl.col("split_set") == "babel_official")
