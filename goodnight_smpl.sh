@@ -197,11 +197,8 @@ geometry() {
 
 # --- 4. kNN ----------------------------------------------------------------------------
 
-# ponytail: the config-write and the knn.txt -> metrics.json reduction are copied from
-# scripts/knn_matrix.sh, because knn_probe.py takes a checkpoint *file* and writes nothing
-# -- it is used by hand and its runner adapts it. ~30 duplicated lines. Factor both helpers
-# into a shared scripts/knn_helpers.sh and source it from here and from knn_matrix.sh if a
-# third caller ever appears; two is not yet worth the indirection.
+# knn_probe.py takes a checkpoint *file* and writes nothing -- it is used by hand and its
+# runner adapts it: the config-write below, and scripts/knn_reduce.py for metrics.json.
 knn() {
     local arch=$1 seed=$2 cell=$3 encoder=$4 checkpoint=$5
     local out="runs/representation/knn/$CORPUS/$arch/$seed/$cell"
@@ -233,29 +230,7 @@ PY
     "${PYTHON[@]}" scripts/knn_probe.py \
         --config "$out/config.yaml" --encoder "$encoder" --sources "$ckpt" | tee "$out/knn.txt"
 
-    "${PYTHON[@]}" - "$out/knn.txt" "$out/metrics.json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-log, out = Path(sys.argv[1]), Path(sys.argv[2])
-names, rows, source = None, {}, None
-for line in log.read_text().splitlines():
-    fields = line.split()
-    if not fields:
-        continue
-    if fields[0] == "source":
-        names = fields[1:]
-    elif names and len(fields) > 2 and fields[1].startswith("k="):
-        source = fields[0]
-        rows[int(fields[1][2:])] = dict(zip(names, (float(value) for value in fields[2:])))
-
-if not rows:
-    raise SystemExit(f"no kNN table in {log}")
-
-best = max(rows, key=lambda k: rows[k]["macro_map"])
-out.write_text(json.dumps({"metrics": rows[best], "k": best, "sweep": rows, "source": source}, indent=2))
-PY
+    "${PYTHON[@]}" scripts/knn_reduce.py "$out/knn.txt" "$out/metrics.json"
 }
 
 

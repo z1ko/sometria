@@ -1,0 +1,30 @@
+# The keypoint arm of the corpus ablation: the same AMASS takes as amass_smpl.yaml, read as
+# 3D COCO keypoints from AMASS_COCO3D. Trains on the three-way paired split sets (takes all
+# of AMASS, AMASS-SMPL and AMASS-COCO hold) -- see notebooks/preprocess_amass_coco.ipynb.
+# 18 joints x 9 channels (pos, vel, acc per axis).
+#
+# Like the SMPL arm, scripts/pretrain_matrix.sh cannot drive this: its cells index the
+# 5-channel OpenSim layout.
+dataloader:
+  root: data/processed
+  normalization: stats/coco18_canonpos_vel_acc_v1/pretrain_paired_coco_v1_train_clean.pt
+  human: config/coco.yaml
+
+  num_workers: 4
+  window_frames: 240
+  batch_size: 200
+
+  train:
+    source_datasets: ["AMASS-COCO"]
+    split_set: pretrain_paired_coco_v1
+    split: train
+
+  val:
+    source_datasets: ["AMASS-COCO"]
+    split_set: babel_paired_coco
+    split: val
+
+model:
+  num_dofs: 18
+  channels_input:  [0, 1, 2] # Only pose input
+  channels_output: [0, 1, 2] # Only pose output

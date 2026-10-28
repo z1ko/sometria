@@ -1,0 +1,27 @@
+# 3D keypoints of AMASS takes, in the column order of the AMASS_COCO3D CSVs: the OpenPose
+# COCO-18 layout, i.e. the 17 COCO keypoints plus a neck. World frame, metres, z up.
+kind: coco
+
+joints:
+  - nose             #00
+  - neck             #01
+  - right_shoulder   #02
+  - right_elbow      #03
+  - right_wrist      #04
+  - left_shoulder    #05
+  - left_elbow       #06
+  - left_wrist       #07
+  - right_hip        #08
+  - right_knee       #09
+  - right_ankle      #10
+  - left_hip         #11
+  - left_knee        #12
+  - left_ankle       #13
+  - right_eye        #14
+  - left_eye         #15
+  - right_ear        #16
+  - left_ear         #17
+
+# COCO has no pelvis joint. Global translation and heading are removed in encode instead,
+# about the hip midpoint, so every joint stays a token.
+excluded_joints: []

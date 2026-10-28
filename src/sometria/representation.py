@@ -102,7 +102,7 @@ class Representation:
         # by both signed_log and mean/std normalization. One mask, one concept: what used
         # to be feature_log_mask and feature_normalization_mask were byte-identical.
         # Read off the channel names so a different layout does not need a new rule.
-        pose = tuple(c.startswith(("sin", "cos", "rot")) for c in self.channels)
+        pose = tuple(c.startswith(("sin", "cos", "rot", "pos")) for c in self.channels)
         self._mask = np.tile(np.logical_not(pose), (len(dofs), 1))
 
     @classmethod
@@ -268,10 +268,85 @@ class SmplRepresentation(Representation):
         return Rotation.from_matrix(matrix).as_rotvec().reshape(frames, joints, 3)
 
 
+COCO_NAME = "coco18_canonpos_vel_acc_v1"
+
+
+class CocoRepresentation(Representation):
+    """The keypoint feature layout: per joint, a 3D position and its first two derivatives.
+
+    The third arm of the corpus ablation, with no joint model at all. Copies what the SMPL
+    layout copies from OpenSim: one token per joint, pose channels left uncompressed,
+    derivatives through signed_log, the take's global placement removed. Here that is
+    done by hand, since a keypoint has no parent frame to be local to: every frame is
+    re-centred on the hip midpoint and rotated about z until the right-to-left hip axis
+    points along +x. Positions are then in metres in that body frame, mostly within
+    [-1, 1], so they are treated as pose like rot6d is.
+    """
+
+    channels: tuple[str, ...] = tuple(
+        f"{kind}{i}" for kind in ("pos", "vel", "acc") for i in range(3)
+    )
+
+    def __init__(
+        self, dofs: tuple[str, ...], excluded: tuple[int, ...], hips: tuple[int, int]
+    ) -> None:
+        super().__init__(dofs, excluded)
+        self.name = COCO_NAME
+        self._hips = hips  # (left, right), indices into the raw joints
+
+    @classmethod
+    def from_human(cls, human: dict) -> "CocoRepresentation":
+        """Build the representation from a keypoint definition (``config/coco.yaml``)."""
+
+        joints = human["joints"]
+        index = {joint: i for i, joint in enumerate(joints)}
+        unknown = [j for j in human.get("excluded_joints") or [] if j not in index]
+        if unknown:
+            raise KeyError(f"excluded_joints: not in joints: {unknown}")
+
+        excluded = {index[j] for j in human.get("excluded_joints") or []}
+        kept = tuple(j for i, j in enumerate(joints) if i not in excluded)
+        return cls(kept, tuple(sorted(excluded)), (index["left_hip"], index["right_hip"]))
+
+    def encode(self, motion: np.ndarray) -> np.ndarray:
+        """World keypoints ``(T, joints, 3)``, z up -> features ``(T, kept, 9)``."""
+
+        if len(motion) < 2:
+            raise ValueError("Need at least two frames to difference; got one.")
+
+        left, right = motion[:, self._hips[0]], motion[:, self._hips[1]]
+        x = motion - ((left + right) / 2)[:, None]
+
+        # ponytail: heading from the hip axis alone, which is ill-defined when it points
+        # straight up (lying on one side). Fit it on hips + shoulders if those takes matter.
+        across = left - right
+        yaw = np.arctan2(across[:, 1], across[:, 0])[:, None]
+        c, s = np.cos(yaw), np.sin(yaw)
+        x = np.stack([c * x[..., 0] + s * x[..., 1], c * x[..., 1] - s * x[..., 0], x[..., 2]], -1)
+
+        pos = np.delete(x, self._excluded, axis=1)
+        vel = np.gradient(pos, axis=0)
+        acc = np.gradient(vel, axis=0)
+
+        out = np.concatenate([pos, vel, acc], axis=-1)
+        return np.where(self._mask, signed_log(out), out)
+
+    def decode(self, features: np.ndarray) -> np.ndarray:
+        """Features ``(T, kept, 9)`` -> keypoints ``(T, kept, 3)`` in the body frame.
+
+        Placement and heading were removed by :meth:`encode` and are gone for good.
+        """
+
+        return features[:, :, :3]
+
+
+LAYOUTS: dict[str, type[Representation]] = {"smpl": SmplRepresentation, "coco": CocoRepresentation}
+
+
 # Which layout a config file describes is the config's business, not the caller's: the
 # datamodule is handed one path and must not know which experiment arm it is running.
 def build_representation(path: str | Path) -> Representation:
     """Build the representation the definition at ``path`` describes."""
 
     human = _load_human_definition(path)
-    return (SmplRepresentation if human.get("kind") == "smpl" else Representation).from_human(human)
+    return LAYOUTS.get(human.get("kind"), Representation).from_human(human)

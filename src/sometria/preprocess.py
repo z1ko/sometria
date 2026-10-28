@@ -31,7 +31,7 @@ import torch as t
 import tqdm
 
 from sometria.catalog import CATALOG, motion_path, stable_sample_id, upsert_table
-from sometria.representation import Representation, SmplRepresentation
+from sometria.representation import CocoRepresentation, Representation, SmplRepresentation
 
 # NOTE: Hardcoded paths, no need for more complexity
 PATH_HUMAN_DEFINITION: Path = Path("config/human.yaml")
@@ -176,6 +176,37 @@ def _load_smpl_sample(path: str | Path) -> dict:
     }
 
 
+# Load a single sample from an AMASS_COCO3D keypoint CSV
+def _load_coco_sample(path: str | Path, joints: list[str]) -> dict:
+    """Load one keypoint CSV into raw world positions ``(time, joints, 3)``.
+
+    Columns are ``time`` plus ``<joint>_x/_y/_z`` per joint of ``config/coco.yaml``.
+    """
+
+    frame = pl.read_csv(path)
+    columns = [f"{joint}_{axis}" for joint in joints for axis in "xyz"]
+    missing = [c for c in ["time", *columns] if c not in frame.columns]
+    if missing:
+        raise ValueError(f"missing columns {missing[:3]}")
+    if len(frame) < 2:
+        raise ValueError(f"{len(frame)} frames, too few to difference.")
+
+    motion = frame.select(columns).to_numpy().astype(np.float64).reshape(-1, len(joints), 3)
+    time = frame["time"].to_numpy()
+    hz = _estimate_hz(time)
+
+    return {
+        "path": str(path),
+        "motion": motion,
+        # Same struct as the other imports; keypoints carry no subject height or mass.
+        "metadata": {"subject_height_m": None, "subject_mass_kg": None},
+        "n_frames": len(motion),
+        "duration": len(motion) / hz,
+        "hz": hz,
+        "time": time,
+    }
+
+
 # What "this file is not a take" looks like from below. A corrupt or truncated archive raises
 # BadZipFile, which inherits straight from Exception and so slips past ValueError -- one such
 # file in a corpus of 19k used to end the whole import at whatever percent it had reached.
@@ -267,6 +298,22 @@ def import_smpl_dataset(
     """
 
     return import_dataset(config=config, representation=representation, load=_load_smpl_sample)
+
+
+def import_coco_dataset(
+    *, config: ImportConfig, human: dict, representation: CocoRepresentation
+) -> pl.DataFrame:
+    """Import AMASS_COCO3D keypoint CSVs. See :func:`import_dataset`.
+
+    The keypoint arm of the corpus ablation. Give it its own ``source_dataset``
+    (``"AMASS-COCO"``) for the same reason as :func:`import_smpl_dataset`.
+    """
+
+    return import_dataset(
+        config=config,
+        representation=representation,
+        load=lambda path: _load_coco_sample(path, human["joints"]),
+    )
 
 
 def import_dataset(
